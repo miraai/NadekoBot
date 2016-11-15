@@ -28,7 +28,7 @@ Command and aliases | Description | Usage
 `.ban` `.b` | Bans a user by ID or name with an optional message. **Requires BanMembers server permission.** | `.b "@some Guy" Your behaviour is toxic.`
 `.softban` `.sb` | Bans and then unbans a user by ID or name with an optional message. **Requires KickMembers server permission.** **Requires ManageMessages server permission.** | `.sb "@some Guy" Your behaviour is toxic.`
 `.kick` `.k` | Kicks a mentioned user. **Requires KickMembers server permission.** | `.k "@some Guy" Your behaviour is toxic.`
-`.setmuterole`  | Sets a name of the role which will be assigned to people who should be muted. Default is nadeko-mute. After specifying this role, restart commands which use mute as punishment. **Requires ManageRoles server permission.** | `.setmuterole Silenced`
+`.setmuterole`  | Sets a name of the role which will be assigned to people who should be muted. Default is nadeko-mute. **Requires ManageRoles server permission.** | `.setmuterole Silenced`
 `.mute`  | Mutes a mentioned user both from speaking and chatting. **Requires ManageRoles server permission.** **Requires MuteMembers server permission.** | `.mute @Someone`
 `.unmute`  | Unmutes a mentioned user previously muted with `.mute` command. **Requires ManageRoles server permission.** **Requires MuteMembers server permission.** | `.unmute @Someone`
 `.chatmute`  | Prevents a mentioned user from chatting in text channels. **Requires ManageRoles server permission.** | `.chatmute @Someone`
@@ -48,8 +48,8 @@ Command and aliases | Description | Usage
 `.setname` `.newnm` | Gives the bot a new name. **Bot owner only.** | `.newnm BotName`
 `.setavatar` `.setav` | Sets a new avatar image for the NadekoBot. Argument is a direct link to an image. **Bot owner only.** | `.setav http://i.imgur.com/xTG3a1I.jpg`
 `.setgame`  | Sets the bots game. **Bot owner only.** | `.setgame with snakes`
-`.setstream`  | Sets the bots stream. First argument is the twitch link, second argument is stream name. **Bot owner only.** | `.setstream https://www.twitch.tv/masterkwoth Developing Nakedo`
-`.send`  | Sends a message to someone on a different server through the bot.  Separate server and channel/user ids with `|` and prepend channel id with `c:` and user id with `u:`. **Bot owner only.** | `.send serverid|c:channelid` or `.send serverid|u:userid`
+`.setstream`  | Sets the bots stream. First argument is the twitch link, second argument is stream name. **Bot owner only.** | `.setstream TWITCHLINK Hello`
+`.send`  | Sends a message to someone on a different server through the bot.  Separate server and channel/user ids with `|` and prepend channel id with `c:` and user id with `u:`. **Bot owner only.** | `.send serverid|c:channelid message` or `.send serverid|u:userid message`
 `.announce`  | Sends a message to all servers' general channel bot is connected to. **Bot owner only.** | `.announce Useless spam`
 `.savechat`  | Saves a number of messages to a text file and sends it to you. **Bot owner only.** | `.savechat 150`
 `.mentionrole` `.menro` | Mentions every person from the provided role or roles (separated by a ',') on this server. Requires you to have mention everyone permission. **Requires MentionEveryone server permission.** | `.menro RoleName`
@@ -115,7 +115,8 @@ Command and aliases | Description | Usage
 Command and aliases | Description | Usage
 ----------------|--------------|-------
 `.addcustreact` `.acr` | Add a custom reaction with a trigger and a response. Running this command in server requires Administration permission. Running this command in DM is Bot Owner only and adds a new global custom reaction. Guide here: <http://nadekobot.readthedocs.io/en/1.0/Custom%20Reactions/>  | `.acr "hello" Hi there %user%`
-`.listcustreact` `.lcr` | Lists global or server custom reactions (15 commands per page). Running the command in DM will list global custom reactions, while running it in server will list that server's custom reactions.  | `.lcr 1`
+`.listcustreact` `.lcr` | Lists global or server custom reactions (20 commands per page). Running the command in DM will list global custom reactions, while running it in server will list that server's custom reactions. Specifying `all` argument instead of the number will DM you a text file with a list of all custom reactions.  | `.lcr 1` or `.lcr all`
+`.listcustreactg` `.lcrg` | Lists global or server custom reactions (20 commands per page) grouped by trigger, and show a number of responses for each. Running the command in DM will list global custom reactions, while running it in server will list that server's custom reactions.  | `.lcrg 1`
 `.showcustreact` `.scr` | Shows a custom reaction's response on a given ID.  | `.scr 1`
 `.delcustreact` `.dcr` | Deletes a custom reaction on a specific index. If ran in DM, it is bot owner only and deletes a global custom reaction. If ran in a server, it requires Administration priviledges and removes server custom reaction.  | `.dcr 5`
 
@@ -219,9 +220,10 @@ Command and aliases | Description | Usage
 ### NSFW  
 Command and aliases | Description | Usage
 ----------------|--------------|-------
-`~hentai`  | Shows a hentai image from a random website (gelbooru or danbooru or konachan or atfbooru) with a given tag. Tag is optional but preferred. Only 1 tag allowed.  | `~hentai yuri`
-`~hentaibomb`  | Shows a total 4 images (from gelbooru, danbooru, konachan and atfbooru). Tag is optional but preferred.  | `~hentaibomb yuri`
+`~hentai`  | Shows a hentai image from a random website (gelbooru or danbooru or konachan or atfbooru or yandere) with a given tag. Tag is optional but preferred. Only 1 tag allowed.  | `~hentai yuri`
+`~hentaibomb`  | Shows a total 5 images (from gelbooru, danbooru, konachan, yandere and atfbooru). Tag is optional but preferred.  | `~hentaibomb yuri`
 `~atfbooru` `~atf` | Shows a random hentai image from atfbooru with a given tag. Tag is optional but preferred.  | `~atfbooru yuri+kissing`
+`~yandere`  | Shows a random image from yandere with a given tag. Tag is optional but preferred. (multiple tags are appended with +)  | `~yandere tag1+tag2`
 `~danbooru`  | Shows a random hentai image from danbooru with a given tag. Tag is optional but preferred. (multiple tags are appended with +)  | `~danbooru yuri+kissing`
 `~konachan`  | Shows a random hentai image from konachan with a given tag. Tag is optional but preferred.  | `~konachan yuri`
 `~gelbooru`  | Shows a random hentai image from gelbooru with a given tag. Tag is optional but preferred. (multiple tags are appended with +)  | `~gelbooru yuri+kissing`
@@ -278,6 +280,7 @@ Command and aliases | Description | Usage
 `~img` `~i` | Pulls the first image found using a search parameter. Use ~ir for different results.  | `~i cute kitten`
 `~ir`  | Pulls a random image using a search parameter.  | `~ir cute kitten`
 `~lmgtfy`  | Google something for an idiot.  | `~lmgtfy query`
+`~shorten`  | Attempts to shorten an URL, if it fails, returns the input URL.  | `~shorten https://google.com`
 `~google` `~g` | Get a google search link for some terms.  | `~google query`
 `~hearthstone` `~hs` | Searches for a Hearthstone card and shows its image. Takes a while to complete.  | `~hs Ysera`
 `~urbandict` `~ud` | Searches Urban Dictionary for a word.  | `~ud Pineapple`
@@ -290,6 +293,11 @@ Command and aliases | Description | Usage
 `~color` `~clr` | Shows you what color corresponds to that hex.  | `~clr 00ff00`
 `~videocall`  | Creates a private <http://www.appear.in> video call link for you and other mentioned people. The link is sent to mentioned people via a private message.  | `~videocall "@SomeGuy"`
 `~avatar` `~av` | Shows a mentioned person's avatar.  | `~av "@SomeGuy"`
+`~bfonline` `~bfo` | Gives you online players for BF3 and BF4  | `~bfo bf3` or `~bfo bf4`
+`~bfuser` `~bfu` | Gives you back a battlefield user's stats.  | `~bfu platform game user`
+`~wikia`  | Gives you back a wikia link  | `~wikia mtg Vigilance` or `~wikia mlp Dashy`
+`~minecraftping` `~mcping` | Pings a minecraft server.  | `~mcping 127.0.0.1:25565`
+`~minecraftquery` `~mcq` | Finds information about a minecraft server.  | `~mcq server:ip`
 `~lolban`  | Shows top banned champions ordered by ban rate.  | `~lolban`
 `~memelist`  | Pulls a list of memes you can use with `~memegen` from http://memegen.link/templates/  | `~memelist`
 `~memegen`  | Generates a meme from memelist with top and bottom text.  | `~memegen biw "gets iced coffee" "in the winter"`
@@ -347,6 +355,6 @@ Command and aliases | Description | Usage
 `.deletequote` `.delq` | Deletes a random quote with the specified keyword. You have to either be server Administrator or the creator of the quote to delete it.  | `.delq abc`
 `.delallq` `.daq` | Deletes all quotes on a specified keyword. **Requires Administrator server permission.** | `.delallq kek`
 `.remind`  | Sends a message to you or a channel after certain amount of time. First argument is me/here/'channelname'. Second argument is time in a descending order (mo>w>d>h>m) example: 1w5d3h10m. Third argument is a (multiword)message.  | `.remind me 1d5h Do something` or `.remind #general Start now!`
-`.remindtemplate`  | Sets message for when the remind is triggered.  Available placeholders are %user% - user who ran the command, %message% - Message specified in the remind, %target% - target channel of the remind. **Bot owner only.** | `.remindtemplate %user%, you gotta do %message%!`
+`.remindtemplate`  | Sets message for when the remind is triggered.  Available placeholders are %user% - user who ran the command, %message% - Message specified in the remind, %target% - target channel of the remind. **Bot owner only.** | `.remindtemplate %user%, do %message%!`
 `.convertlist`  | List of the convertible dimensions and currencies.  | `.convertlist`
 `.convert`  | Convert quantities. Use `.convertlist` to see supported dimensions and currencies.  | `.convert m km 1000`
