@@ -3,6 +3,7 @@ using Discord.WebSocket;
 using NadekoBot.Extensions;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Net.Http;
 using System.Threading;
@@ -12,80 +13,162 @@ namespace NadekoBot.Services.Impl
 {
     public class StatsService : IStatsService
     {
-        private int messageCounter;
-        private ShardedDiscordClient  client;
-        private DateTime started;
-        private int commandsRan = 0;
+        private readonly DiscordShardedClient _client;
+        private readonly DateTime _started;
 
-        public const string BotVersion = "1.0-rc2";
+        public const string BotVersion = "1.26a";
 
-        public string Heap => Math.Round((double)GC.GetTotalMemory(false) / 1.MiB(), 2).ToString();
+        public string Author => "Kwoth#2560";
+        public string Library => "Discord.Net";
+        public string Heap =>
+            Math.Round((double)GC.GetTotalMemory(false) / 1.MiB(), 2).ToString(CultureInfo.InvariantCulture);
+        public double MessagesPerSecond => MessageCounter / GetUptime().TotalSeconds;
 
-        Timer carbonitexTimer { get; }
+        private long _textChannels;
+        public long TextChannels => Interlocked.Read(ref _textChannels);
+        private long _voiceChannels;
+        public long VoiceChannels => Interlocked.Read(ref _voiceChannels);
+        private long _messageCounter;
+        public long MessageCounter => Interlocked.Read(ref _messageCounter);
+        private long _commandsRan;
+        public long CommandsRan => Interlocked.Read(ref _commandsRan);
 
+        private Timer carbonitexTimer { get; }
 
-        public StatsService(ShardedDiscordClient  client, CommandHandler cmdHandler)
+        public StatsService(DiscordShardedClient client, CommandHandler cmdHandler)
         {
 
-            this.client = client;
+            _client = client;
 
-            Reset();
-            this.client.MessageReceived += _ => Task.FromResult(messageCounter++);
-            cmdHandler.CommandExecuted += (_, e) => commandsRan++;
+            _started = DateTime.Now;
+            _client.MessageReceived += _ => Task.FromResult(Interlocked.Increment(ref _messageCounter));
+            cmdHandler.CommandExecuted += (_, e) => Task.FromResult(Interlocked.Increment(ref _commandsRan));
 
-            this.client.Disconnected += _ => Reset();
-
-            this.carbonitexTimer = new Timer(async (state) =>
+            _client.ChannelCreated += (c) =>
             {
-            if (string.IsNullOrWhiteSpace(NadekoBot.Credentials.CarbonKey))
-                return;
+                if (c is ITextChannel)
+                    Interlocked.Increment(ref _textChannels);
+                else if (c is IVoiceChannel)
+                    Interlocked.Increment(ref _voiceChannels);
+
+                return Task.CompletedTask;
+            };
+
+            _client.ChannelDestroyed += (c) =>
+            {
+                if (c is ITextChannel)
+                    Interlocked.Decrement(ref _textChannels);
+                else if (c is IVoiceChannel)
+                    Interlocked.Decrement(ref _voiceChannels);
+
+                return Task.CompletedTask;
+            };
+
+            _client.GuildAvailable += (g) =>
+            {
+                var _ = Task.Run(() =>
+                {
+                    var tc = g.Channels.Count(cx => cx is ITextChannel);
+                    var vc = g.Channels.Count - tc;
+                    Interlocked.Add(ref _textChannels, tc);
+                    Interlocked.Add(ref _voiceChannels, vc);
+                });
+                return Task.CompletedTask;
+            };
+
+            _client.JoinedGuild += (g) =>
+            {
+                var _ = Task.Run(() =>
+                {
+                    var tc = g.Channels.Count(cx => cx is ITextChannel);
+                    var vc = g.Channels.Count - tc;
+                    Interlocked.Add(ref _textChannels, tc);
+                    Interlocked.Add(ref _voiceChannels, vc);
+                });
+                return Task.CompletedTask;
+            };
+
+            _client.GuildUnavailable += (g) =>
+            {
+                var _ = Task.Run(() =>
+                {
+                    var tc = g.Channels.Count(cx => cx is ITextChannel);
+                    var vc = g.Channels.Count - tc;
+                    Interlocked.Add(ref _textChannels, -tc);
+                    Interlocked.Add(ref _voiceChannels, -vc);
+                });
+
+                return Task.CompletedTask;
+            };
+
+            _client.LeftGuild += (g) =>
+            {
+                var _ = Task.Run(() =>
+                {
+                    var tc = g.Channels.Count(cx => cx is ITextChannel);
+                    var vc = g.Channels.Count - tc;
+                    Interlocked.Add(ref _textChannels, -tc);
+                    Interlocked.Add(ref _voiceChannels, -vc);
+                });
+
+                return Task.CompletedTask;
+            };
+
+            carbonitexTimer = new Timer(async (state) =>
+            {
+                if (string.IsNullOrWhiteSpace(NadekoBot.Credentials.CarbonKey))
+                    return;
                 try
                 {
                     using (var http = new HttpClient())
                     {
                         using (var content = new FormUrlEncodedContent(
                             new Dictionary<string, string> {
-                                { "servercount", this.client.GetGuilds().Count.ToString() },
+                                { "servercount", _client.GetGuildCount().ToString() },
                                 { "key", NadekoBot.Credentials.CarbonKey }}))
                         {
                             content.Headers.Clear();
                             content.Headers.Add("Content-Type", "application/x-www-form-urlencoded");
 
-                            var res = await http.PostAsync("https://www.carbonitex.net/discord/data/botdata.php", content).ConfigureAwait(false);
+                            await http.PostAsync("https://www.carbonitex.net/discord/data/botdata.php", content).ConfigureAwait(false);
                         }
-                    };
+                    }
                 }
-                catch { }
+                catch
+                {
+                    // ignored
+                }
             }, null, TimeSpan.FromHours(1), TimeSpan.FromHours(1));
         }
-        public async Task<string> Print()
+
+        public void Initialize()
         {
-            var curUser = await client.GetCurrentUserAsync();
-            return $@"```css
-Author: [Kwoth#2560] | Library: [Discord.Net]
+            var guilds = _client.GetGuilds().ToArray();
+            _textChannels = guilds.Sum(g => g.Channels.Count(cx => cx is ITextChannel));
+            _voiceChannels = guilds.Sum(g => g.Channels.Count) - _textChannels;
+        }
+
+        public Task<string> Print()
+        {
+            var curUser = _client.CurrentUser;
+            return Task.FromResult($@"
+Author: [{Author}] | Library: [{Library}]
 Bot Version: [{BotVersion}]
 Bot ID: {curUser.Id}
 Owner ID(s): {string.Join(", ", NadekoBot.Credentials.OwnerIds)}
 Uptime: {GetUptimeString()}
-Servers: {client.GetGuilds().Count} | TextChannels: {client.GetGuilds().SelectMany(g => g.GetChannels().Where(c => c is ITextChannel)).Count()} | VoiceChannels: {client.GetGuilds().SelectMany(g => g.GetChannels().Where(c => c is IVoiceChannel)).Count()}
-Commands Ran this session: {commandsRan}
-Messages: {messageCounter} [{messageCounter / (double)GetUptime().TotalSeconds:F2}/sec] Heap: [{Heap} MB]```";
-        }
-
-        public Task Reset()
-        {
-            messageCounter = 0;
-            started = DateTime.Now;
-            return Task.CompletedTask;
+Servers: {_client.GetGuildCount()} | TextChannels: {TextChannels} | VoiceChannels: {VoiceChannels}
+Commands Ran this session: {CommandsRan}
+Messages: {MessageCounter} [{MessagesPerSecond:F2}/sec] Heap: [{Heap} MB]");
         }
 
         public TimeSpan GetUptime() =>
-            DateTime.Now - started;
+            DateTime.Now - _started;
 
-        public string GetUptimeString()
+        public string GetUptimeString(string separator = ", ")
         {
             var time = GetUptime();
-            return time.Days + " days, " + time.Hours + " hours, and " + time.Minutes + " minutes.";
+            return $"{time.Days} days{separator}{time.Hours} hours{separator}{time.Minutes} minutes";
         }
     }
 }

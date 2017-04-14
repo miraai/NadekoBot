@@ -18,9 +18,8 @@ namespace NadekoBot.Modules.Searches.Models
             public int SPD { get; set; }
             public int SPE { get; set; }
 
-            public override string ToString() => $@"
-    **HP:**  {HP,-4} **ATK:** {ATK,-4} **DEF:** {DEF,-4}
-    **SPA:** {SPA,-4} **SPD:** {SPD,-4} **SPE:** {SPE,-4}";
+            public override string ToString() => $@"**HP:**  {HP,-4} **ATK:** {ATK,-4} **DEF:** {DEF,-4}
+**SPA:** {SPA,-4} **SPD:** {SPD,-4} **SPE:** {SPE,-4}";
         }
         public int Id { get; set; }
         public string Species { get; set; }
@@ -34,22 +33,23 @@ namespace NadekoBot.Modules.Searches.Models
         public string[] Evos { get; set; }
         public string[] EggGroups { get; set; }
 
-        public override string ToString() => $@"`Name:` {Species}
-`Types:` {string.Join(", ", Types)}
-`Stats:` {BaseStats}
-`Height:` {HeightM,4}m `Weight:` {WeightKg}kg
-`Abilities:` {string.Join(", ", Abilities.Values)}";
+//        public override string ToString() => $@"`Name:` {Species}
+//`Types:` {string.Join(", ", Types)}
+//`Stats:` {BaseStats}
+//`Height:` {HeightM,4}m `Weight:` {WeightKg}kg
+//`Abilities:` {string.Join(", ", Abilities.Values)}";
 
     }
 
     public class SearchPokemonAbility
     {
         public string Desc { get; set; }
+        public string ShortDesc { get; set; }
         public string Name { get; set; }
         public float Rating { get; set; }
 
-        public override string ToString() => $@"`Name:` : {Name}
-`Rating:` {Rating}
-`Description:` {Desc}";
+//        public override string ToString() => $@"`Name:` : {Name}
+//`Rating:` {Rating}
+//`Description:` {Desc}";
     }
 }

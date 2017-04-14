@@ -12,11 +12,14 @@ using System.Reflection;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using NadekoBot.Modules.Permissions;
-using Module = Discord.Commands.Module;
 using NadekoBot.TypeReaders;
 using System.Collections.Concurrent;
+using System.Collections.Immutable;
+using System.Diagnostics;
 using NadekoBot.Modules.Music;
 using NadekoBot.Services.Database.Models;
+using System.Resources;
+using NadekoBot.Resources;
 
 namespace NadekoBot
 {
@@ -24,22 +27,26 @@ namespace NadekoBot
     {
         private Logger _log;
         
-        public static uint OkColor { get; } = 0x00ff00;
-        public static uint ErrorColor { get; } = 0xff0000;
+        public static Color OkColor { get; }
+        public static Color ErrorColor { get; }
 
         public static CommandService CommandService { get; private set; }
         public static CommandHandler CommandHandler { get; private set; }
-        public static ShardedDiscordClient  Client { get; private set; }
-        public static Localization Localizer { get; private set; }
-        public static BotCredentials Credentials { get; private set; }
+        public static DiscordShardedClient Client { get; private set; }
+        public static BotCredentials Credentials { get; }
+
+        public static Localization Localization { get; private set; }
+        public static ResourceManager ResponsesResourceManager { get; } = new ResourceManager(typeof(ResponseStrings));
 
         public static GoogleApiService Google { get; private set; }
         public static StatsService Stats { get; private set; }
+        public static IImagesService Images { get; private set; }
 
         public static ConcurrentDictionary<string, string> ModulePrefixes { get; private set; }
         public static bool Ready { get; private set; }
 
-        public static IEnumerable<GuildConfig> AllGuildConfigs { get; }
+        public static ImmutableArray<GuildConfig> AllGuildConfigs { get; }
+        public static BotConfig BotConfig { get; }
 
         static NadekoBot()
         {
@@ -48,8 +55,14 @@ namespace NadekoBot
 
             using (var uow = DbHandler.UnitOfWork())
             {
-                AllGuildConfigs = uow.GuildConfigs.GetAll();
+                AllGuildConfigs = uow.GuildConfigs.GetAllGuildConfigs().ToImmutableArray();
+                BotConfig = uow.BotConfig.GetOrCreate();
+                OkColor = new Color(Convert.ToUInt32(BotConfig.OkColor, 16));
+                ErrorColor = new Color(Convert.ToUInt32(BotConfig.ErrorColor, 16));
             }
+
+            //ImageSharp.Configuration.Default.AddImageFormat(new ImageSharp.Formats.PngFormat());
+            //ImageSharp.Configuration.Default.AddImageFormat(new ImageSharp.Formats.JpegFormat());
         }
 
         public async Task RunAsync(params string[] args)
@@ -59,57 +72,82 @@ namespace NadekoBot
             _log.Info("Starting NadekoBot v" + StatsService.BotVersion);
 
             //create client
-            Client = new ShardedDiscordClient(new DiscordSocketConfig
+            Client = new DiscordShardedClient(new DiscordSocketConfig
             {
                 AudioMode = Discord.Audio.AudioMode.Outgoing,
                 MessageCacheSize = 10,
                 LogLevel = LogSeverity.Warning,
                 TotalShards = Credentials.TotalShards,
-                ConnectionTimeout = int.MaxValue
+                ConnectionTimeout = int.MaxValue,
+#if !GLOBAL_NADEKO
+                //AlwaysDownloadUsers = true,
+#endif
             });
 
+#if GLOBAL_NADEKO
+            Client.Log += Client_Log;
+#endif
+
             //initialize Services
-            CommandService = new CommandService();
-            Localizer = new Localization();
+            Localization = new Localization(NadekoBot.BotConfig.Locale, NadekoBot.AllGuildConfigs.ToDictionary(x => x.GuildId, x => x.Locale));
+            CommandService = new CommandService(new CommandServiceConfig() {
+                CaseSensitiveCommands = false,
+                DefaultRunMode = RunMode.Sync
+            });
             Google = new GoogleApiService();
             CommandHandler = new CommandHandler(Client, CommandService);
             Stats = new StatsService(Client, CommandHandler);
+            Images = await ImagesService.Create().ConfigureAwait(false);
 
-            //setup DI
-            var depMap = new DependencyMap();
-            depMap.Add<ILocalization>(Localizer);
-            depMap.Add<ShardedDiscordClient>(Client);
-            depMap.Add<CommandService>(CommandService);
-            depMap.Add<IGoogleApiService>(Google);
+            ////setup DI
+            //var depMap = new DependencyMap();
+            //depMap.Add<ILocalization>(Localizer);
+            //depMap.Add<ShardedDiscordClient>(Client);
+            //depMap.Add<CommandService>(CommandService);
+            //depMap.Add<IGoogleApiService>(Google);
 
 
             //setup typereaders
             CommandService.AddTypeReader<PermissionAction>(new PermissionActionTypeReader());
-            CommandService.AddTypeReader<Command>(new CommandTypeReader());
-            CommandService.AddTypeReader<Module>(new ModuleTypeReader());
+            CommandService.AddTypeReader<CommandInfo>(new CommandTypeReader());
+            CommandService.AddTypeReader<CommandOrCrInfo>(new CommandOrCrTypeReader());
+            CommandService.AddTypeReader<ModuleInfo>(new ModuleTypeReader());
             CommandService.AddTypeReader<IGuild>(new GuildTypeReader());
 
+
+            var sw = Stopwatch.StartNew();
             //connect
             await Client.LoginAsync(TokenType.Bot, Credentials.Token).ConfigureAwait(false);
             await Client.ConnectAsync().ConfigureAwait(false);
-            await Client.DownloadAllUsersAsync().ConfigureAwait(false);
+            //await Client.DownloadAllUsersAsync().ConfigureAwait(false);
+            Stats.Initialize();
 
-            _log.Info("Connected");
+            sw.Stop();
+            _log.Info("Connected in " + sw.Elapsed.TotalSeconds.ToString("F2"));
 
             //load commands and prefixes
-            using (var uow = DbHandler.UnitOfWork())
-            {
-                ModulePrefixes = new ConcurrentDictionary<string, string>(uow.BotConfig.GetOrCreate().ModulePrefixes.ToDictionary(m => m.ModuleName, m => m.Prefix));
-            }
+
+            ModulePrefixes = new ConcurrentDictionary<string, string>(NadekoBot.BotConfig.ModulePrefixes.OrderByDescending(mp => mp.Prefix.Length).ToDictionary(m => m.ModuleName, m => m.Prefix));
+
             // start handling messages received in commandhandler
+            
             await CommandHandler.StartHandling().ConfigureAwait(false);
 
-            await CommandService.LoadAssembly(this.GetType().GetTypeInfo().Assembly, depMap).ConfigureAwait(false);
+            var _ = await Task.Run(() => CommandService.AddModulesAsync(this.GetType().GetTypeInfo().Assembly)).ConfigureAwait(false);
 #if !GLOBAL_NADEKO
-            await CommandService.Load(new Music(Localizer, CommandService, Client, Google)).ConfigureAwait(false);
+            await CommandService.AddModuleAsync<Music>().ConfigureAwait(false);
 #endif
             Ready = true;
             Console.WriteLine(await Stats.Print().ConfigureAwait(false));
+        }
+
+        private Task Client_Log(LogMessage arg)
+        {
+            _log.Warn(arg.Source + " | " + arg.Message);
+            if (arg.Exception != null)
+                _log.Warn(arg.Exception);
+
+            return Task.CompletedTask;
         }
 
         public async Task RunAndBlockAsync(params string[] args)

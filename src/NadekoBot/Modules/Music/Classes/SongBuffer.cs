@@ -25,21 +25,21 @@ namespace NadekoBot.Modules.Music.Classes
             _log = LogManager.GetCurrentClassLogger();
         }
 
-        MusicPlayer MusicPlayer;
+        MusicPlayer MusicPlayer { get; }
 
-        private string Basename;
+        private string Basename { get; }
 
-        private SongInfo SongInfo;
+        private SongInfo SongInfo { get; }
 
-        private int SkipTo;
+        private int SkipTo { get; }
 
-        private int MaxFileSize = 2.MiB();
+        private int MaxFileSize { get; } = 2.MiB();
 
         private long FileNumber = -1;
 
         private long NextFileToRead = 0;
 
-        public bool BufferingCompleted { get; private set;} = false;
+        public bool BufferingCompleted { get; private set; } = false;
 
         private ulong CurrentBufferSize = 0;
 
@@ -56,7 +56,7 @@ namespace NadekoBot.Modules.Music.Classes
                    p = Process.Start(new ProcessStartInfo
                    {
                        FileName = "ffmpeg",
-                       Arguments = $"-ss {SkipTo} -i {SongInfo.Uri} -f s16le -ar 48000 -ac 2 pipe:1 -loglevel quiet",
+                       Arguments = $"-ss {SkipTo} -i {SongInfo.Uri} -f s16le -ar 48000 -vn -ac 2 pipe:1 -loglevel quiet",
                        UseShellExecute = false,
                        RedirectStandardOutput = true,
                        RedirectStandardError = false,
@@ -76,7 +76,8 @@ namespace NadekoBot.Modules.Music.Classes
                            try
                            {
                                outStream.Dispose();
-                           }catch { }
+                           }
+                           catch { }
                            outStream = new FileStream(Basename + "-" + ++FileNumber, FileMode.Append, FileAccess.Write, FileShare.Read);
                            currentFileSize = bytesRead;
                        }
@@ -98,8 +99,8 @@ namespace NadekoBot.Modules.Music.Classes
                    Console.WriteLine(@"You have not properly installed or configured FFMPEG. 
 Please install and configure FFMPEG to play music. 
 Check the guides for your platform on how to setup ffmpeg correctly:
-    Windows Guide: https://goo.gl/SCv72y
-    Linux Guide:  https://goo.gl/rRhjCp");
+    Windows Guide: https://goo.gl/OjKk8F
+    Linux Guide:  https://goo.gl/ShjCUo");
                    Console.ForegroundColor = oldclr;
                }
                catch (Exception ex)
@@ -108,8 +109,8 @@ Check the guides for your platform on how to setup ffmpeg correctly:
                }
                finally
                {
-                   if(outStream != null)
-                        outStream.Dispose();
+                   if (outStream != null)
+                       outStream.Dispose();
                    Console.WriteLine($"Buffering done.");
                    if (p != null)
                    {
@@ -130,7 +131,7 @@ Check the guides for your platform on how to setup ffmpeg correctly:
         private string GetNextFile()
         {
             string filename = Basename + "-" + NextFileToRead;
-            
+
             if (NextFileToRead != 0)
             {
                 try
@@ -151,7 +152,7 @@ Check the guides for your platform on how to setup ffmpeg correctly:
 
         private void CleanFiles()
         {
-            for (long i = NextFileToRead - 1 ; i <= FileNumber; i++)
+            for (long i = NextFileToRead - 1; i <= FileNumber; i++)
             {
                 try
                 {
@@ -169,7 +170,7 @@ Check the guides for your platform on how to setup ffmpeg correctly:
 
         public override bool CanWrite => false;
 
-        public override long Length => (long) CurrentBufferSize;
+        public override long Length => (long)CurrentBufferSize;
 
         public override long Position { get; set; } = 0;
 
@@ -178,7 +179,7 @@ Check the guides for your platform on how to setup ffmpeg correctly:
         public override int Read(byte[] buffer, int offset, int count)
         {
             int read = CurrentFileStream.Read(buffer, offset, count);
-            if(read < count)
+            if (read < count)
             {
                 if (!BufferingCompleted || IsNextFileReady())
                 {

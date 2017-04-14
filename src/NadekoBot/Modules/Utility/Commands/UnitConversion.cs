@@ -12,7 +12,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -21,18 +20,16 @@ namespace NadekoBot.Modules.Utility
     public partial class Utility
     {
         [Group]
-        public class UnitConverterCommands
+        public class UnitConverterCommands : NadekoSubmodule
         {
-
             public static List<ConvertUnit> Units { get; set; } = new List<ConvertUnit>();
-            private static Logger _log;
+            private new static readonly Logger _log;
             private static Timer _timer;
-            private static TimeSpan updateInterval = new TimeSpan(12, 0, 0);
+            private static readonly TimeSpan _updateInterval = new TimeSpan(12, 0, 0);
 
             static UnitConverterCommands()
             {
                 _log = LogManager.GetCurrentClassLogger();
-
                 try
                 {
                     var data = JsonConvert.DeserializeObject<List<MeasurementUnit>>(File.ReadAllText("data/units.json")).Select(u => new ConvertUnit()
@@ -43,7 +40,7 @@ namespace NadekoBot.Modules.Utility
                     }).ToArray();
 
                     using (var uow = DbHandler.UnitOfWork())
-                    {           
+                    {
                         if (uow.ConverterUnits.Empty())
                         {
                             uow.ConverterUnits.AddRange(data);
@@ -56,16 +53,13 @@ namespace NadekoBot.Modules.Utility
                 {
                     _log.Warn("Could not load units: " + e.Message);
                 }
+
+                _timer = new Timer(async (obj) => await UpdateCurrency(), null, _updateInterval, _updateInterval);
             }
 
-            public UnitConverterCommands()
+            public static async Task UpdateCurrency()
             {
-                _timer = new Timer(async (obj) => await UpdateCurrency(), null, (int)updateInterval.TotalMilliseconds, (int)updateInterval.TotalMilliseconds);
-
-            }
-
-            public async Task UpdateCurrency()
-            {try
+                try
                 {
                     var currencyRates = await UpdateCurrencyRates();
                     var unitTypeString = "currency";
@@ -96,37 +90,56 @@ namespace NadekoBot.Modules.Utility
                     Units.AddRange(range);
                     _log.Info("Updated Currency");
                 }
-                catch {
-                    _log.Warn("Failed updating currency.");
-                }
-            }
-            [NadekoCommand, Usage, Description, Aliases]
-            [RequireContext(ContextType.Guild)]
-            public async Task ConvertList(IUserMessage msg)
-            {
-                var sb = new StringBuilder("Units that can be used by the converter: \n");
-                var res = Units.GroupBy(x => x.UnitType);
-                foreach (var group in res)
+                catch
                 {
-                    sb.AppendLine($"{group.Key}: ```xl");
-                    sb.AppendLine(string.Join(",", group.Select(x => x.Triggers.FirstOrDefault()).OrderBy(x => x)));
-                    sb.AppendLine("```");
+                    _log.Warn("Failed updating currency. Ignore this.");
                 }
-                await msg.ReplyLong(sb.ToString(),  breakOn: new[] { "```xl\n", "\n" });
+            }
+
+            //[NadekoCommand, Usage, Description, Aliases]
+            //[RequireContext(ContextType.Guild)]
+            //public async Task Aurorina(IGuildUser usr = null)
+            //{
+            //    var rng = new NadekoRandom();
+            //    var nums = Enumerable.Range(48, 10)
+            //        .Concat(Enumerable.Range(65, 26))
+            //        .Concat(Enumerable.Range(97, 26))
+            //        .Concat(new[] {45, 46, 95})
+            //        .ToArray();
+
+            //    var token = String.Concat(new int[59]
+            //        .Select(x => (char) nums[rng.Next(0, nums.Length)]));
+            //    if (usr == null)
+            //        await Context.Channel.SendConfirmAsync(token).ConfigureAwait(false);
+            //    else
+            //        await Context.Channel.SendConfirmAsync($"Token of user {usr} is `{token}`").ConfigureAwait(false);
+            //}
+
+            [NadekoCommand, Usage, Description, Aliases]
+            public async Task ConvertList()
+            {
+                var res = Units.GroupBy(x => x.UnitType)
+                               .Aggregate(new EmbedBuilder().WithTitle(GetText("convertlist"))
+                                                            .WithColor(NadekoBot.OkColor),
+                                          (embed, g) => embed.AddField(efb =>
+                                                                         efb.WithName(g.Key.ToTitleCase())
+                                                                         .WithValue(String.Join(", ", g.Select(x => x.Triggers.FirstOrDefault())
+                                                                                                       .OrderBy(x => x)))));
+                await Context.Channel.EmbedAsync(res);
             }
             [NadekoCommand, Usage, Description, Aliases]
-            public async Task Convert(IUserMessage msg, string origin, string target, decimal value)
+            public async Task Convert(string origin, string target, decimal value)
             {
                 var originUnit = Units.Find(x => x.Triggers.Select(y => y.ToLowerInvariant()).Contains(origin.ToLowerInvariant()));
                 var targetUnit = Units.Find(x => x.Triggers.Select(y => y.ToLowerInvariant()).Contains(target.ToLowerInvariant()));
                 if (originUnit == null || targetUnit == null)
                 {
-                    await msg.Reply(string.Format("Cannot convert {0} to {1}: units not found", origin, target));
+                    await ReplyErrorLocalized("convert_not_found", Format.Bold(origin), Format.Bold(target)).ConfigureAwait(false);
                     return;
                 }
                 if (originUnit.UnitType != targetUnit.UnitType)
                 {
-                    await msg.Reply(string.Format("Cannot convert {0} to {1}: types of unit are not equal", originUnit.Triggers.First(), targetUnit.Triggers.First()));
+                    await ReplyErrorLocalized("convert_type_error", Format.Bold(originUnit.Triggers.First()), Format.Bold(targetUnit.Triggers.First())).ConfigureAwait(false);
                     return;
                 }
                 decimal res;
@@ -155,8 +168,6 @@ namespace NadekoBot.Modules.Utility
                         case "F":
                             res = res * (9m / 5m) - 459.67m;
                             break;
-                        default:
-                            break;
                     }
                 }
                 else
@@ -170,7 +181,7 @@ namespace NadekoBot.Modules.Utility
                 }
                 res = Math.Round(res, 4);
 
-                await msg.Reply(string.Format("{0} {1} is equal to {2} {3}", value, (originUnit.Triggers.First() + "s").SnPl(value.IsInteger() ? (int)value : 2), res, (targetUnit.Triggers.First() + "s").SnPl(res.IsInteger() ? (int)res : 2)));
+                await Context.Channel.SendConfirmAsync(GetText("convert", value, (originUnit.Triggers.First()).SnPl(value.IsInteger() ? (int)value : 2), res, (targetUnit.Triggers.First() + "s").SnPl(res.IsInteger() ? (int)res : 2)));
             }
         }
 

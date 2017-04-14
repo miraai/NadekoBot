@@ -1,6 +1,6 @@
-﻿using Discord;
-using Discord.Commands;
+﻿using Discord.Commands;
 using NadekoBot.Attributes;
+using NadekoBot.Extensions;
 using NadekoBot.Services;
 using System;
 using System.Threading.Tasks;
@@ -10,13 +10,9 @@ namespace NadekoBot.Modules.Searches
     public partial class Searches
     {
         [Group]
-        public class PlaceCommands
+        public class PlaceCommands : NadekoSubmodule
         {
-            string typesStr { get; } = "";
-            public PlaceCommands()
-            {
-                typesStr = $"`List of \"{NadekoBot.ModulePrefixes[typeof(Searches).Name]}place\" tags:`\n" + String.Join(", ", Enum.GetNames(typeof(PlaceType)));
-            }
+            private static string typesStr { get; } = string.Join(", ", Enum.GetNames(typeof(PlaceType)));
 
             public enum PlaceType
             {
@@ -31,22 +27,17 @@ namespace NadekoBot.Modules.Searches
             }
 
             [NadekoCommand, Usage, Description, Aliases]
-            [RequireContext(ContextType.Guild)]
-            public async Task Placelist(IUserMessage imsg)
+            public async Task Placelist()
             {
-                var channel = (ITextChannel)imsg.Channel;
-
-                await channel.SendMessageAsync(typesStr)
+                await Context.Channel.SendConfirmAsync(GetText("list_of_place_tags", NadekoBot.ModulePrefixes[typeof(Searches).Name]), 
+                    typesStr)
                              .ConfigureAwait(false);
             }
 
             [NadekoCommand, Usage, Description, Aliases]
-            [RequireContext(ContextType.Guild)]
-            public async Task Place(IUserMessage imsg, PlaceType placeType, uint width = 0, uint height = 0)
+            public async Task Place(PlaceType placeType, uint width = 0, uint height = 0)
             {
-                var channel = (ITextChannel)imsg.Channel;
-
-                string url = "";
+                var url = "";
                 switch (placeType)
                 {
                     case PlaceType.Cage:
@@ -83,7 +74,7 @@ namespace NadekoBot.Modules.Searches
 
                 url += $"/{width}/{height}";
 
-                await channel.SendMessageAsync(url).ConfigureAwait(false);
+                await Context.Channel.SendMessageAsync(url).ConfigureAwait(false);
             }
         }
     }

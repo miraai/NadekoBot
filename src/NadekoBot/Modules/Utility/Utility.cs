@@ -4,228 +4,495 @@ using NadekoBot.Attributes;
 using System;
 using System.Linq;
 using System.Threading.Tasks;
-using NadekoBot.Services;
 using System.Text;
 using NadekoBot.Extensions;
-using System.Text.RegularExpressions;
 using System.Reflection;
+using NadekoBot.Services.Impl;
+using System.Net.Http;
+using System.Collections.Concurrent;
+using System.Threading;
+using ImageSharp;
+using System.Collections.Generic;
+using Newtonsoft.Json;
 using Discord.WebSocket;
+using NadekoBot.Services;
 
 namespace NadekoBot.Modules.Utility
 {
-
     [NadekoModule("Utility", ".")]
-    public partial class Utility : DiscordModule
+    public partial class Utility : NadekoTopLevelModule
     {
-        public Utility(ILocalization loc, CommandService cmds, ShardedDiscordClient client) : base(loc, cmds, client)
-        {
+        private static ConcurrentDictionary<ulong, Timer> _rotatingRoleColors = new ConcurrentDictionary<ulong, Timer>();
 
+        //[NadekoCommand, Usage, Description, Aliases]
+        //[RequireContext(ContextType.Guild)]
+        //public async Task Midorina([Remainder] string arg)
+        //{
+        //    var channel = (ITextChannel)Context.Channel;
+
+        //    var roleNames = arg?.Split(';');
+
+        //    if (roleNames == null || roleNames.Length == 0)
+        //        return;
+
+        //    var j = 0;
+        //    var roles = roleNames.Select(x => Context.Guild.Roles.FirstOrDefault(r => String.Compare(r.Name, x, StringComparison.OrdinalIgnoreCase) == 0))
+        //            .Where(x => x != null)
+        //            .Take(10)
+        //            .ToArray();
+
+        //    var rnd = new NadekoRandom();
+        //    var reactions = new[] { "🎬", "🐧", "🌍", "🌺", "🚀", "☀", "🌲", "🍒", "🐾", "🏀" }
+        //        .OrderBy(x => rnd.Next())
+        //        .ToArray();
+
+        //    var roleStrings = roles
+        //            .Select(x => $"{reactions[j++]} -> {x.Name}");
+            
+        //    var msg = await Context.Channel.SendConfirmAsync("Pick a Role",
+        //        string.Join("\n", roleStrings)).ConfigureAwait(false);
+
+        //    for (int i = 0; i < roles.Length; i++)
+        //    {
+        //        try { await msg.AddReactionAsync(reactions[i]).ConfigureAwait(false); }
+        //        catch (Exception ex) { _log.Warn(ex); }
+        //        await Task.Delay(1000).ConfigureAwait(false);
+        //    }
+
+        //    msg.OnReaction((r) => Task.Run(async () =>
+        //    {
+        //        try
+        //        {
+        //            var usr = r.User.GetValueOrDefault() as IGuildUser;
+
+        //            if (usr == null)
+        //                return;
+
+        //            var index = Array.IndexOf<string>(reactions, r.Emoji.Name);
+        //            if (index == -1)
+        //                return;
+
+        //            await usr.RemoveRolesAsync(roles[index]);
+        //        }
+        //        catch (Exception ex)
+        //        {
+        //            _log.Warn(ex);
+        //        }
+        //    }), (r) => Task.Run(async () =>
+        //    {
+        //        try
+        //        {
+        //            var usr = r.User.GetValueOrDefault() as IGuildUser;
+
+        //            if (usr == null)
+        //                return;
+
+        //            var index = Array.IndexOf<string>(reactions, r.Emoji.Name);
+        //            if (index == -1)
+        //                return;
+
+        //            await usr.RemoveRolesAsync(roles[index]);
+        //        }
+        //        catch (Exception ex)
+        //        {
+        //            _log.Warn(ex);
+        //        }
+        //    }));
+        //}
+
+        [NadekoCommand, Usage, Description, Aliases]
+        [RequireContext(ContextType.Guild)]
+        [RequireUserPermission(GuildPermission.ManageRoles)]
+        [OwnerOnly]
+        public async Task RotateRoleColor(int timeout, IRole role, params string[] hexes)
+        {
+            var channel = (ITextChannel)Context.Channel;
+
+            if ((timeout < 60 && timeout != 0) || timeout > 3600)
+                return;
+
+            Timer t;
+            if (timeout == 0 || hexes.Length == 0)
+            {
+                if (_rotatingRoleColors.TryRemove(role.Id, out t))
+                {
+                    t.Change(Timeout.Infinite, Timeout.Infinite);
+                    await ReplyConfirmLocalized("rrc_stop", Format.Bold(role.Name)).ConfigureAwait(false);
+                }
+                return;
+            }
+            
+            var hexColors = hexes.Select(hex =>
+            {
+                try { return (ImageSharp.Color?)ImageSharp.Color.FromHex(hex.Replace("#", "")); } catch { return null; }
+            })
+            .Where(c => c != null)
+            .Select(c => c.Value)
+            .ToArray();
+
+            if (!hexColors.Any())
+            {
+                await ReplyErrorLocalized("rrc_no_colors").ConfigureAwait(false);
+                return;
+            }
+
+            var images = hexColors.Select(color =>
+            {
+                var img = new ImageSharp.Image(50, 50);
+                img.BackgroundColor(color);
+                return img;
+            }).Merge().ToStream();
+
+            var i = 0;
+            t = new Timer(async (_) =>
+            {
+                try
+                {
+                    var color = hexColors[i];
+                    await role.ModifyAsync(r => r.Color = new Discord.Color(color.R, color.G, color.B)).ConfigureAwait(false);
+                    ++i;
+                    if (i >= hexColors.Length)
+                        i = 0;
+                }
+                catch { }
+            }, null, 0, timeout * 1000);
+
+            _rotatingRoleColors.AddOrUpdate(role.Id, t, (key, old) =>
+            {
+                old.Change(Timeout.Infinite, Timeout.Infinite);
+                return t;
+            });
+            await channel.SendFileAsync(images, "magicalgirl.jpg", GetText("rrc_start", Format.Bold(role.Name))).ConfigureAwait(false);
+        }
+
+        [NadekoCommand, Usage, Description, Aliases]
+        public async Task TogetherTube()
+        {
+            Uri target;
+            using (var http = new HttpClient())
+            {
+                var res = await http.GetAsync("https://togethertube.com/room/create").ConfigureAwait(false);
+                target = res.RequestMessage.RequestUri;
+            }
+
+            await Context.Channel.EmbedAsync(new EmbedBuilder().WithOkColor()
+                .WithAuthor(eab => eab.WithIconUrl("https://togethertube.com/assets/img/favicons/favicon-32x32.png")
+                .WithName("Together Tube")
+                .WithUrl("https://togethertube.com/"))
+                .WithDescription(Context.User.Mention + " " + GetText("togtub_room_link") +  "\n" + target));
         }
 
         [NadekoCommand, Usage, Description, Aliases]
         [RequireContext(ContextType.Guild)]
-        public async Task WhosPlaying(IUserMessage umsg, [Remainder] string game = null)
+        public async Task WhosPlaying([Remainder] string game)
         {
-            var channel = (ITextChannel)umsg.Channel;
-            game = game.Trim().ToUpperInvariant();
+            game = game?.Trim().ToUpperInvariant();
             if (string.IsNullOrWhiteSpace(game))
                 return;
-            var arr = (await (umsg.Channel as IGuildChannel).Guild.GetUsersAsync())
+
+            var socketGuild = Context.Guild as SocketGuild;
+            if (socketGuild == null)
+            {
+                _log.Warn("Can't cast guild to socket guild.");
+                return;
+            }
+            var rng = new NadekoRandom();
+            var arr = await Task.Run(() => socketGuild.Users
                     .Where(u => u.Game?.Name?.ToUpperInvariant() == game)
                     .Select(u => u.Username)
-                    .ToList();
+                    .OrderBy(x => rng.Next())
+                    .Take(60)
+                    .ToArray()).ConfigureAwait(false);
 
             int i = 0;
-            if (!arr.Any())
-                await channel.SendMessageAsync(_l["🚧 `Nobody is playing that game.`"]).ConfigureAwait(false);
+            if (arr.Length == 0)
+                await ReplyErrorLocalized("nobody_playing_game").ConfigureAwait(false);
             else
-                await channel.SendMessageAsync("```css\n" + string.Join("\n", arr.GroupBy(item => (i++) / 3).Select(ig => string.Concat(ig.Select(el => $"• {el,-35}")))) + "\n```").ConfigureAwait(false);
+            {
+                await Context.Channel.SendConfirmAsync("```css\n" + string.Join("\n", arr.GroupBy(item => (i++) / 2)
+                                                                                 .Select(ig => string.Concat(ig.Select(el => $"• {el,-27}")))) + "\n```")
+                                                                                 .ConfigureAwait(false);
+            }
         }
 
         [NadekoCommand, Usage, Description, Aliases]
         [RequireContext(ContextType.Guild)]
-        public async Task InRole(IUserMessage umsg, [Remainder] string roles)
+        public async Task InRole([Remainder] IRole role)
         {
-            if (string.IsNullOrWhiteSpace(roles))
-                return;
-            var channel = (ITextChannel)umsg.Channel;
-            var arg = roles.Split(',').Select(r => r.Trim().ToUpperInvariant());
-            string send = _l["ℹ️ **Here is a list of users in a specfic role:**"];
-            foreach (var roleStr in arg.Where(str => !string.IsNullOrWhiteSpace(str) && str != "@EVERYONE" && str != "EVERYONE"))
-            {
-                var role = channel.Guild.Roles.Where(r => r.Name.ToUpperInvariant() == roleStr).FirstOrDefault();
-                if (role == null) continue;
-                send += $"```css\n[{role.Name}]\n";
-                send += string.Join(", ", channel.Guild.GetUsers().Where(u => u.Roles.Contains(role)).Select(u => u.ToString()));
-                send += $"\n```";
-            }
-            var usr = umsg.Author as IGuildUser;
-            while (send.Length > 2000)
-            {
-                if (!usr.GetPermissions(channel).ManageMessages)
-                {
-                    await channel.SendMessageAsync($"⚠️ {usr.Mention} **you are not allowed to use this command on roles with a lot of users in them to prevent abuse.**").ConfigureAwait(false);
-                    return;
-                }
-                var curstr = send.Substring(0, 2000);
-                await channel.SendMessageAsync(curstr.Substring(0,
-                        curstr.LastIndexOf(", ", StringComparison.Ordinal) + 1)).ConfigureAwait(false);
-                send = curstr.Substring(curstr.LastIndexOf(", ", StringComparison.Ordinal) + 1) +
-                       send.Substring(2000);
-            }
-            await channel.SendMessageAsync(send).ConfigureAwait(false);
+            var rng = new NadekoRandom();
+            var usrs = (await Context.Guild.GetUsersAsync()).ToArray();
+            var roleUsers = usrs.Where(u => u.RoleIds.Contains(role.Id)).Select(u => u.ToString())
+                .ToArray();
+            var embed = new EmbedBuilder().WithOkColor()
+                .WithTitle("ℹ️ " + Format.Bold(GetText("inrole_list", Format.Bold(role.Name))) + $" - {roleUsers.Length}")
+                .WithDescription(string.Join(", ", roleUsers
+                    .OrderBy(x => rng.Next())
+                    .Take(50)));
+            await Context.Channel.EmbedAsync(embed).ConfigureAwait(false);
         }
 
         [NadekoCommand, Usage, Description, Aliases]
         [RequireContext(ContextType.Guild)]
-        public async Task CheckMyPerms(IUserMessage msg)
+        public async Task CheckMyPerms()
         {
 
-            StringBuilder builder = new StringBuilder("```http\n");
-            var user = msg.Author as IGuildUser;
-            var perms = user.GetPermissions((ITextChannel)msg.Channel);
+            StringBuilder builder = new StringBuilder();
+            var user = (IGuildUser) Context.User;
+            var perms = user.GetPermissions((ITextChannel)Context.Channel);
             foreach (var p in perms.GetType().GetProperties().Where(p => !p.GetGetMethod().GetParameters().Any()))
             {
-                builder.AppendLine($"{p.Name} : {p.GetValue(perms, null).ToString()}");
+                builder.AppendLine($"{p.Name} : {p.GetValue(perms, null)}");
             }
-
-            builder.Append("```");
-            await msg.Reply(builder.ToString());
+            await Context.Channel.SendConfirmAsync(builder.ToString());
         }
 
         [NadekoCommand, Usage, Description, Aliases]
         [RequireContext(ContextType.Guild)]
-        public async Task UserId(IUserMessage msg, IGuildUser target = null)
+        public async Task UserId(IGuildUser target = null)
         {
-            var usr = target ?? msg.Author;
-            await msg.Reply($"🆔 of the user **{ usr.Username }** is `{ usr.Id }`").ConfigureAwait(false);
+            var usr = target ?? Context.User;
+            await ReplyConfirmLocalized("userid", "🆔", Format.Bold(usr.ToString()),
+                Format.Code(usr.Id.ToString())).ConfigureAwait(false);
         }
 
         [NadekoCommand, Usage, Description, Aliases]
-        public async Task ChannelId(IUserMessage msg)
+        public async Task ChannelId()
         {
-            await msg.Reply($"ℹ️ This **Channel's ID** is `{msg.Channel.Id}`").ConfigureAwait(false);
-        }
-
-        [NadekoCommand, Usage, Description, Aliases]
-        [RequireContext(ContextType.Guild)]
-        public async Task ServerId(IUserMessage msg)
-        {
-            await msg.Reply($"ℹ️ This **Server's ID** is `{((ITextChannel)msg.Channel).Guild.Id}`").ConfigureAwait(false);
+            await ReplyConfirmLocalized("channelid", "🆔", Format.Code(Context.Channel.Id.ToString()))
+                .ConfigureAwait(false);
         }
 
         [NadekoCommand, Usage, Description, Aliases]
         [RequireContext(ContextType.Guild)]
-        public async Task Roles(IUserMessage msg, IGuildUser target, int page = 1)
+        public async Task ServerId()
         {
-            var channel = (ITextChannel)msg.Channel;
+            await ReplyConfirmLocalized("serverid", "🆔", Format.Code(Context.Guild.Id.ToString()))
+                .ConfigureAwait(false);
+        }
+
+        [NadekoCommand, Usage, Description, Aliases]
+        [RequireContext(ContextType.Guild)]
+        public async Task Roles(IGuildUser target, int page = 1)
+        {
+            var channel = (ITextChannel)Context.Channel;
             var guild = channel.Guild;
 
-            const int RolesPerPage = 20;
+            const int rolesPerPage = 20;
 
             if (page < 1 || page > 100)
                 return;
+
             if (target != null)
             {
-                await msg.Reply($"⚔ **Page #{page} of roles for {target.Username}:** ```css\n• " + string.Join("\n• ", target.Roles.Except(new[] { guild.EveryoneRole }).OrderBy(r => r.Position).Skip((page - 1) * RolesPerPage).Take(RolesPerPage)).SanitizeMentions() + "\n```");
+                var roles = target.GetRoles().Except(new[] { guild.EveryoneRole }).OrderBy(r => -r.Position).Skip((page - 1) * rolesPerPage).Take(rolesPerPage).ToArray();
+                if (!roles.Any())
+                {
+                    await ReplyErrorLocalized("no_roles_on_page").ConfigureAwait(false);
+                }
+                else
+                {
+                    
+                    await channel.SendConfirmAsync(GetText("roles_page", page, Format.Bold(target.ToString())), 
+                        "\n• " + string.Join("\n• ", (IEnumerable<IRole>)roles).SanitizeMentions()).ConfigureAwait(false);
+                }
             }
             else
             {
-                await msg.Reply($"⚔ **Page #{page} of all roles on this server:** ```css\n• " + string.Join("\n• ", guild.Roles.Except(new[] { guild.EveryoneRole }).OrderBy(r => r.Position).Skip((page - 1) * RolesPerPage).Take(RolesPerPage)).SanitizeMentions() + "\n```");
+                var roles = guild.Roles.Except(new[] { guild.EveryoneRole }).OrderBy(r => -r.Position).Skip((page - 1) * rolesPerPage).Take(rolesPerPage).ToArray();
+                if (!roles.Any())
+                {
+                    await ReplyErrorLocalized("no_roles_on_page").ConfigureAwait(false);
+                }
+                else
+                {
+                    await channel.SendConfirmAsync(GetText("roles_all_page", page),
+                        "\n• " + string.Join("\n• ", (IEnumerable<IRole>)roles).SanitizeMentions()).ConfigureAwait(false);
+                }
             }
         }
 
         [NadekoCommand, Usage, Description, Aliases]
         [RequireContext(ContextType.Guild)]
-        public Task Roles(IUserMessage msg, int page = 1) =>
-            Roles(msg, null, page);
+        public Task Roles(int page = 1) =>
+            Roles(null, page);
 
         [NadekoCommand, Usage, Description, Aliases]
         [RequireContext(ContextType.Guild)]
-        public async Task ChannelTopic(IUserMessage umsg)
+        public async Task ChannelTopic([Remainder]ITextChannel channel = null)
         {
-            var channel = (ITextChannel)umsg.Channel;
+            if (channel == null)
+                channel = (ITextChannel)Context.Channel;
 
             var topic = channel.Topic;
             if (string.IsNullOrWhiteSpace(topic))
-                await channel.SendMessageAsync("❎ **No topic set.**");
+                await ReplyErrorLocalized("no_topic_set").ConfigureAwait(false);
             else
-                await channel.SendMessageAsync("ℹ️ **Topic:** " + topic);
-        }
-
-        [NadekoCommand, Usage, Description, Aliases]
-        public async Task Stats(IUserMessage umsg)
-        {
-            var channel = umsg.Channel;
-
-            await channel.SendMessageAsync(await NadekoBot.Stats.Print());
-        }
-
-        private Regex emojiFinder { get; } = new Regex(@"<:(?<name>.+?):(?<id>\d*)>", RegexOptions.Compiled);
-        [NadekoCommand, Usage, Description, Aliases]
-        public async Task Showemojis(IUserMessage msg, [Remainder] string emojis)
-        {
-            var matches = emojiFinder.Matches(emojis);
-
-            var result = string.Join("\n", matches.Cast<Match>()
-                                                  .Select(m => $"**Name:** {m.Groups["name"]} **Link:** http://discordapp.com/api/emojis/{m.Groups["id"]}.png"));
-            
-            await msg.Channel.SendMessageAsync(result).ConfigureAwait(false);
+                await Context.Channel.SendConfirmAsync(GetText("channel_topic"), topic).ConfigureAwait(false);
         }
 
         [NadekoCommand, Usage, Description, Aliases]
         [RequireContext(ContextType.Guild)]
-        [OwnerOnly]
-        public async Task ListServers(IUserMessage imsg, int page = 1)
+        [RequireBotPermission(ChannelPermission.CreateInstantInvite)]
+        [RequireUserPermission(ChannelPermission.CreateInstantInvite)]
+        public async Task CreateInvite()
         {
-            var channel = (ITextChannel)imsg.Channel;
+            var invite = await ((ITextChannel)Context.Channel).CreateInviteAsync(0, null, isUnique: true);
 
+            await Context.Channel.SendConfirmAsync($"{Context.User.Mention} https://discord.gg/{invite.Code}");
+        }
+
+        [NadekoCommand, Usage, Description, Aliases]
+        public async Task ShardStats(int page = 1)
+        {
+            if (page < 1)
+                return;
+
+            var status = string.Join(", ", NadekoBot.Client.Shards.GroupBy(x => x.ConnectionState)
+                .Select(x => $"{x.Count()} {x.Key}")
+                .ToArray());
+
+            var allShardStrings = NadekoBot.Client.Shards
+                .Select(x =>
+                    GetText("shard_stats_txt", x.ShardId.ToString(),
+                        Format.Bold(x.ConnectionState.ToString()), Format.Bold(x.Guilds.Count.ToString())))
+                .ToArray();
+
+
+
+            await Context.Channel.SendPaginatedConfirmAsync(page, (curPage) =>
+            {
+
+                var str = string.Join("\n", allShardStrings.Skip(25 * (curPage - 1)).Take(25));
+
+                if (string.IsNullOrWhiteSpace(str))
+                    str = GetText("no_shards_on_page");
+
+                return new EmbedBuilder()
+                    .WithAuthor(a => a.WithName(GetText("shard_stats")))
+                    .WithTitle(status)
+                    .WithOkColor()
+                    .WithDescription(str);
+            }, allShardStrings.Length / 25);
+        }
+
+        [NadekoCommand, Usage, Description, Aliases]
+        public async Task ShardId(ulong guildid)
+        {
+            var shardId = NadekoBot.Client.GetShardIdFor(guildid);
+
+            await Context.Channel.SendConfirmAsync(shardId.ToString()).ConfigureAwait(false);
+        }
+
+        [NadekoCommand, Usage, Description, Aliases]
+        public async Task Stats()
+        {
+            var stats = NadekoBot.Stats;
+
+            var shardId = Context.Guild != null
+                ? NadekoBot.Client.GetShardIdFor(Context.Guild.Id)
+                : 0;
+
+            await Context.Channel.EmbedAsync(
+                new EmbedBuilder().WithOkColor()
+                    .WithAuthor(eab => eab.WithName($"NadekoBot v{StatsService.BotVersion}")
+                                          .WithUrl("http://nadekobot.readthedocs.io/en/latest/")
+                                          .WithIconUrl("https://cdn.discordapp.com/avatars/116275390695079945/b21045e778ef21c96d175400e779f0fb.jpg"))
+                    .AddField(efb => efb.WithName(GetText("author")).WithValue(stats.Author).WithIsInline(true))
+                    .AddField(efb => efb.WithName(GetText("botid")).WithValue(NadekoBot.Client.CurrentUser.Id.ToString()).WithIsInline(true))
+                    .AddField(efb => efb.WithName(GetText("shard")).WithValue($"#{shardId} / {NadekoBot.Client.Shards.Count}").WithIsInline(true))
+                    .AddField(efb => efb.WithName(GetText("commands_ran")).WithValue(stats.CommandsRan.ToString()).WithIsInline(true))
+                    .AddField(efb => efb.WithName(GetText("messages")).WithValue($"{stats.MessageCounter} ({stats.MessagesPerSecond:F2}/sec)").WithIsInline(true))
+                    .AddField(efb => efb.WithName(GetText("memory")).WithValue($"{stats.Heap} MB").WithIsInline(true))
+                    .AddField(efb => efb.WithName(GetText("owner_ids")).WithValue(string.Join("\n", NadekoBot.Credentials.OwnerIds)).WithIsInline(true))
+                    .AddField(efb => efb.WithName(GetText("uptime")).WithValue(stats.GetUptimeString("\n")).WithIsInline(true))
+                    .AddField(efb => efb.WithName(GetText("presence")).WithValue(
+                        GetText("presence_txt",
+                            NadekoBot.Client.GetGuildCount(), stats.TextChannels, stats.VoiceChannels)).WithIsInline(true))
+#if !GLOBAL_NADEKO
+                    .WithFooter(efb => efb.WithText(GetText("stats_songs",
+                        Music.Music.MusicPlayers.Count(mp => mp.Value.CurrentSong != null),
+                        Music.Music.MusicPlayers.Sum(mp => mp.Value.Playlist.Count))))
+#endif
+                    );
+        }
+
+        [NadekoCommand, Usage, Description, Aliases]
+        public async Task Showemojis([Remainder] string emojis)
+        {
+            var tags = Context.Message.Tags.Where(t => t.Type == TagType.Emoji).Select(t => (Emoji)t.Value);
+
+            var result = string.Join("\n", tags.Select(m => GetText("showemojis", m, m.Url)));
+
+            if (string.IsNullOrWhiteSpace(result))
+                await ReplyErrorLocalized("showemojis_none").ConfigureAwait(false);
+            else
+                await Context.Channel.SendMessageAsync(result).ConfigureAwait(false);
+        }
+
+        [NadekoCommand, Usage, Description, Aliases]
+        [OwnerOnly]
+        public async Task ListServers(int page = 1)
+        {
             page -= 1;
 
             if (page < 0)
                 return;
 
-            var guilds = NadekoBot.Client.GetGuilds().OrderBy(g => g.Name).Skip((page - 1) * 15).Take(15);
+            var guilds = await Task.Run(() => NadekoBot.Client.GetGuilds().OrderBy(g => g.Name).Skip((page - 1) * 15).Take(15)).ConfigureAwait(false);
 
             if (!guilds.Any())
             {
-                await channel.SendMessageAsync("❎ No servers found on that page.").ConfigureAwait(false);
+                await ReplyErrorLocalized("listservers_none").ConfigureAwait(false);
                 return;
             }
 
-            await channel.SendMessageAsync(String.Join("\n", guilds.Select(g => $"```css\nName: {g.Name} ID:{g.Id} Members:#{g.GetUsers().Count} OwnerID: {g.OwnerId} ```"))).ConfigureAwait(false);
+            await Context.Channel.EmbedAsync(guilds.Aggregate(new EmbedBuilder().WithOkColor(),
+                                     (embed, g) => embed.AddField(efb => efb.WithName(g.Name)
+                                                                           .WithValue(
+                                             GetText("listservers", g.Id, g.Users.Count,
+                                                 g.OwnerId))
+                                                                           .WithIsInline(false))))
+                         .ConfigureAwait(false);
         }
 
-        //[NadekoCommand, Usage, Description, Aliases]
-        //[RequireContext(ContextType.Guild)]
-        //public async Task TextToImage(IUserMessage msg, [Remainder] string arg)
-        //{
-        //    var channel = (ITextChannel)msg.Channel;
 
-        //    const string bgName = "xbiy3";
+        [NadekoCommand, Usage, Description, Aliases]
+        [RequireContext(ContextType.Guild)]
+        [OwnerOnly]
+        public async Task SaveChat(int cnt)
+        {
+            var msgs = new List<IMessage>(cnt);
+            await Context.Channel.GetMessagesAsync(cnt).ForEachAsync(dled => msgs.AddRange(dled)).ConfigureAwait(false);
 
-        //    if (string.IsNullOrWhiteSpace(arg))
-        //        return;
-
-        //    using (var http = new HttpClient())
-        //    {
-        //        http.AddFakeHeaders();
-
-        //        http.DefaultRequestHeaders.Add("Host", "www.tagsmaker.com");
-        //        http.DefaultRequestHeaders.Add("Referer", "http://www.tagsmaker.com/");
-        //        http.DefaultRequestHeaders.Add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
-        //        http.DefaultRequestHeaders.Add("Alt-Used", "www.tagsmaker.com:443");
-
-        //        var res = await http.GetAsync($"http://www.tagsmaker.com/tagsmaker.php?background_name=0011&tag_text={arg}&font_name=applejuiced&text_color=white&text_size=48&text_alignment=middle").ConfigureAwait(false);
-
-        //        var img = res.RequestMessage.RequestUri.Segments[1].Replace("image-", "").Replace("tag-", "");
-        //        var imgStream = await http.GetStreamAsync($"http://www.tagsmaker.com/upload/www.tagsmaker.com_{ img.ToString() }.png");
-        //        var ms = new MemoryStream();
-        //        await imgStream.CopyToAsync(ms).ConfigureAwait(false);
-        //        ms.Position = 0;
-        //        await channel.SendFileAsync(ms, arg+".png", "Provided by www.tagsmaker.com").ConfigureAwait(false);
-        //    }
-        //}
+            var title = $"Chatlog-{Context.Guild.Name}/#{Context.Channel.Name}-{DateTime.Now}.txt";
+            var grouping = msgs.GroupBy(x => $"{x.CreatedAt.Date:dd.MM.yyyy}")
+                .Select(g => new
+                {
+                    date = g.Key,
+                    messages = g.OrderBy(x => x.CreatedAt).Select(s =>
+                    {
+                        var msg = $"【{s.Timestamp:HH:mm:ss}】{s.Author}:";
+                        if (string.IsNullOrWhiteSpace(s.ToString()))
+                        {
+                            if (s.Attachments.Any())
+                            {
+                                msg += "FILES_UPLOADED: " + string.Join("\n", s.Attachments.Select(x => x.Url));
+                            }
+                            else if (s.Embeds.Any())
+                            {
+                                //todo probably just go through all properties and check if they are set, if they are, add them
+                                msg += "EMBEDS: " + string.Join("\n--------\n", s.Embeds.Select(x => $"Description: {x.Description}"));
+                            }
+                        }
+                        else
+                        {
+                            msg += s.ToString();
+                        }
+                        return msg;
+                    })
+                });
+            await Context.User.SendFileAsync(
+                await JsonConvert.SerializeObject(grouping, Formatting.Indented).ToStream().ConfigureAwait(false), title, title).ConfigureAwait(false);
+        }
     }
 }
-

@@ -7,77 +7,119 @@ using System.Collections.Concurrent;
 using NadekoBot.Services.Database.Models;
 using Discord;
 using NadekoBot.Extensions;
+using NLog;
+using System.Diagnostics;
+using Discord.WebSocket;
+using System;
+using NadekoBot.DataStructures;
 
 namespace NadekoBot.Modules.CustomReactions
 {
-    [NadekoModule("CustomReactions",".")]
-    public class CustomReactions : DiscordModule
+    public static class CustomReactionExtensions
     {
-        public static ConcurrentHashSet<CustomReaction> GlobalReactions { get; } = new ConcurrentHashSet<CustomReaction>();
-        public static ConcurrentDictionary<ulong, ConcurrentHashSet<CustomReaction>> GuildReactions { get; } = new ConcurrentDictionary<ulong, ConcurrentHashSet<CustomReaction>>();
-        
+        public static async Task<IUserMessage> Send(this CustomReaction cr, IUserMessage context)
+        {
+            var channel = cr.DmResponse ? await context.Author.CreateDMChannelAsync() : context.Channel;
+            
+            CustomReactions.ReactionStats.AddOrUpdate(cr.Trigger, 1, (k, old) => ++old);
+
+            CREmbed crembed;
+            if (CREmbed.TryParse(cr.Response, out crembed))
+            {
+                return await channel.EmbedAsync(crembed.ToEmbed(), crembed.PlainText ?? "");
+            }
+            return await channel.SendMessageAsync(cr.ResponseWithContext(context));
+        }
+    }
+
+    [NadekoModule("CustomReactions", ".")]
+    public class CustomReactions : NadekoTopLevelModule
+    {
+        private static CustomReaction[] _globalReactions = new CustomReaction[] { };
+        public static CustomReaction[] GlobalReactions => _globalReactions;
+        public static ConcurrentDictionary<ulong, CustomReaction[]> GuildReactions { get; } = new ConcurrentDictionary<ulong, CustomReaction[]>();
+
+        public static ConcurrentDictionary<string, uint> ReactionStats { get; } = new ConcurrentDictionary<string, uint>();
+
+        private new static readonly Logger _log;
+
         static CustomReactions()
         {
+            _log = LogManager.GetCurrentClassLogger();
+            var sw = Stopwatch.StartNew();
             using (var uow = DbHandler.UnitOfWork())
             {
                 var items = uow.CustomReactions.GetAll();
-                GuildReactions = new ConcurrentDictionary<ulong, ConcurrentHashSet<CustomReaction>>(items.Where(g => g.GuildId != null && g.GuildId != 0).GroupBy(k => k.GuildId.Value).ToDictionary(g => g.Key, g => new ConcurrentHashSet<CustomReaction>(g)));
-                GlobalReactions = new ConcurrentHashSet<CustomReaction>(items.Where(g => g.GuildId == null || g.GuildId == 0));
+                GuildReactions = new ConcurrentDictionary<ulong, CustomReaction[]>(items.Where(g => g.GuildId != null && g.GuildId != 0).GroupBy(k => k.GuildId.Value).ToDictionary(g => g.Key, g => g.ToArray()));
+                _globalReactions = items.Where(g => g.GuildId == null || g.GuildId == 0).ToArray();
             }
-        }
-        public CustomReactions(ILocalization loc, CommandService cmds, ShardedDiscordClient client) : base(loc, cmds, client)
-        {
+            sw.Stop();
+            _log.Debug($"Loaded in {sw.Elapsed.TotalSeconds:F2}s");
         }
 
-        public static async Task<bool> TryExecuteCustomReaction(IUserMessage umsg)
+        public void ClearStats() => ReactionStats.Clear();
+
+        public static CustomReaction TryGetCustomReaction(SocketUserMessage umsg)
         {
-            var channel = umsg.Channel as ITextChannel;
+            var channel = umsg.Channel as SocketTextChannel;
             if (channel == null)
-                return false;
+                return null;
 
             var content = umsg.Content.Trim().ToLowerInvariant();
-            ConcurrentHashSet<CustomReaction> reactions;
+            CustomReaction[] reactions;
+
             GuildReactions.TryGetValue(channel.Guild.Id, out reactions);
             if (reactions != null && reactions.Any())
             {
-                var reaction = reactions.Where(cr => {
+                var rs = reactions.Where(cr =>
+                {
+                    if (cr == null)
+                        return false;
+
                     var hasTarget = cr.Response.ToLowerInvariant().Contains("%target%");
                     var trigger = cr.TriggerWithContext(umsg).Trim().ToLowerInvariant();
                     return ((hasTarget && content.StartsWith(trigger + " ")) || content == trigger);
-                }).Shuffle().FirstOrDefault();
-                if (reaction != null)
+                }).ToArray();
+
+                if (rs.Length != 0)
                 {
-                    try { await channel.SendMessageAsync(reaction.ResponseWithContext(umsg)).ConfigureAwait(false); } catch { }
-                    return true;
+                    var reaction = rs[new NadekoRandom().Next(0, rs.Length)];
+                    if (reaction != null)
+                    {
+                        if (reaction.Response == "-")
+                            return null;
+                        return reaction;
+                    }
                 }
             }
-            var greaction = GlobalReactions.Where(cr =>
+
+            var grs = GlobalReactions.Where(cr =>
             {
+                if (cr == null)
+                    return false;
                 var hasTarget = cr.Response.ToLowerInvariant().Contains("%target%");
                 var trigger = cr.TriggerWithContext(umsg).Trim().ToLowerInvariant();
                 return ((hasTarget && content.StartsWith(trigger + " ")) || content == trigger);
-            }).Shuffle().FirstOrDefault();
+            }).ToArray();
+            if (grs.Length == 0)
+                return null;
+            var greaction = grs[new NadekoRandom().Next(0, grs.Length)];
 
-            if (greaction != null)
-            {
-                try { await channel.SendMessageAsync(greaction.ResponseWithContext(umsg)).ConfigureAwait(false); } catch { }
-                return true;
-            }
-            return false;
+            return greaction;
         }
 
         [NadekoCommand, Usage, Description, Aliases]
-        public async Task AddCustReact(IUserMessage imsg, string key, [Remainder] string message)
+        public async Task AddCustReact(string key, [Remainder] string message)
         {
-            var channel = imsg.Channel as ITextChannel;
+            var channel = Context.Channel as ITextChannel;
             if (string.IsNullOrWhiteSpace(message) || string.IsNullOrWhiteSpace(key))
                 return;
 
             key = key.ToLowerInvariant();
 
-            if ((channel == null && !NadekoBot.Credentials.IsOwner(imsg.Author)) || (channel != null && !((IGuildUser)imsg.Author).GuildPermissions.Administrator))
+            if ((channel == null && !NadekoBot.Credentials.IsOwner(Context.User)) || (channel != null && !((IGuildUser)Context.User).GuildPermissions.Administrator))
             {
-                try { await imsg.Channel.SendMessageAsync("Insufficient permissions. Requires Bot ownership for global custom reactions, and Administrator for guild custom reactions."); } catch { }
+                await ReplyErrorLocalized("insuff_perms").ConfigureAwait(false);
                 return;
             }
 
@@ -98,42 +140,68 @@ namespace NadekoBot.Modules.CustomReactions
 
             if (channel == null)
             {
-                GlobalReactions.Add(cr);
+                Array.Resize(ref _globalReactions, _globalReactions.Length + 1);
+                _globalReactions[_globalReactions.Length - 1] = cr;
             }
             else
             {
-                var reactions = GuildReactions.GetOrAdd(channel.Guild.Id, new ConcurrentHashSet<CustomReaction>());
-                reactions.Add(cr);
+                GuildReactions.AddOrUpdate(Context.Guild.Id,
+                    new CustomReaction[] { cr },
+                    (k, old) =>
+                    {
+                        Array.Resize(ref old, old.Length + 1);
+                        old[old.Length - 1] = cr;
+                        return old;
+                    });
             }
 
-            await imsg.Channel.SendMessageAsync($"`Added new custom reaction {cr.Id}:`\n\t`Trigger:` {key}\n\t`Response:` {message}").ConfigureAwait(false);
+            await Context.Channel.EmbedAsync(new EmbedBuilder().WithOkColor()
+                .WithTitle(GetText("new_cust_react"))
+                .WithDescription($"#{cr.Id}")
+                .AddField(efb => efb.WithName(GetText("trigger")).WithValue(key))
+                .AddField(efb => efb.WithName(GetText("response")).WithValue(message))
+                ).ConfigureAwait(false);
         }
 
         [NadekoCommand, Usage, Description, Aliases]
         [Priority(0)]
-        public async Task ListCustReact(IUserMessage imsg, int page = 1)
+        public async Task ListCustReact(int page = 1)
         {
-            var channel = imsg.Channel as ITextChannel;
-
             if (page < 1 || page > 1000)
                 return;
-            ConcurrentHashSet<CustomReaction> customReactions;
-            if (channel == null)
-                customReactions = GlobalReactions;
+            CustomReaction[] customReactions;
+            if (Context.Guild == null)
+                customReactions = GlobalReactions.Where(cr => cr != null).ToArray();
             else
-                customReactions = GuildReactions.GetOrAdd(channel.Guild.Id, new ConcurrentHashSet<CustomReaction>());
+                customReactions = GuildReactions.GetOrAdd(Context.Guild.Id, Array.Empty<CustomReaction>()).Where(cr => cr != null).ToArray();
 
             if (customReactions == null || !customReactions.Any())
-                await imsg.Channel.SendMessageAsync("`No custom reactions found`").ConfigureAwait(false);
-            else
-                await imsg.Channel.SendMessageAsync(
-                    $"`Page {page} of custom reactions:`\n" + 
-                        string.Join("\n", customReactions
-                                                .OrderBy(cr => cr.Trigger)
-                                                .Skip((page - 1) * 20)
-                                                .Take(20)
-                                                .Select(cr => $"`#{cr.Id}`  `Trigger:` {cr.Trigger}")))
-                             .ConfigureAwait(false);
+            {
+                await ReplyErrorLocalized("no_found").ConfigureAwait(false);
+                return;
+            }
+
+            var lastPage = customReactions.Length / 20;
+            await Context.Channel.SendPaginatedConfirmAsync(page, curPage =>
+                new EmbedBuilder().WithOkColor()
+                    .WithTitle(GetText("name"))
+                    .WithDescription(string.Join("\n", customReactions.OrderBy(cr => cr.Trigger)
+                                                    .Skip((curPage - 1) * 20)
+                                                    .Take(20)
+                                                    .Select(cr =>
+                                                    {
+                                                        var str = $"`#{cr.Id}` {cr.Trigger}";
+                                                        if (cr.AutoDeleteTrigger)
+                                                        {
+                                                            str = "🗑" + str;
+                                                        }
+                                                        if (cr.DmResponse)
+                                                        {
+                                                            str = "📪" + str;
+                                                        }
+                                                        return str;
+                                                    }))), lastPage)
+                                .ConfigureAwait(false);
         }
 
         public enum All
@@ -143,88 +211,99 @@ namespace NadekoBot.Modules.CustomReactions
 
         [NadekoCommand, Usage, Description, Aliases]
         [Priority(1)]
-        public async Task ListCustReact(IUserMessage imsg, All x)
+        public async Task ListCustReact(All x)
         {
-            var channel = imsg.Channel as ITextChannel;
-
-            ConcurrentHashSet<CustomReaction> customReactions;
-            if (channel == null)
-                customReactions = GlobalReactions;
+            CustomReaction[] customReactions;
+            if (Context.Guild == null)
+                customReactions = GlobalReactions.Where(cr => cr != null).ToArray();
             else
-                customReactions = GuildReactions.GetOrAdd(channel.Guild.Id, new ConcurrentHashSet<CustomReaction>());
+                customReactions = GuildReactions.GetOrAdd(Context.Guild.Id, new CustomReaction[]{ }).Where(cr => cr != null).ToArray();
 
             if (customReactions == null || !customReactions.Any())
-                await imsg.Channel.SendMessageAsync("`No custom reactions found`").ConfigureAwait(false);
-            else
             {
-                var txtStream = await customReactions.GroupBy(cr => cr.Trigger)
-                                                          .OrderBy(cr => cr.Key)
-                                                          .Select(cr => new { Trigger = cr.Key, Responses = cr.Count() })
-                                                          .ToJson()
-                                                          .ToStream()
-                                                          .ConfigureAwait(false);
-                if (channel == null) // its a private one, just send back
-                    await imsg.Channel.SendFileAsync(txtStream, "customreactions.txt", "List of all custom reactions").ConfigureAwait(false);
-                else
-                    await ((IGuildUser)imsg.Author).SendFileAsync(txtStream, "customreactions.txt", "List of all custom reactions").ConfigureAwait(false);
+                await ReplyErrorLocalized("no_found").ConfigureAwait(false);
+                return;
             }
+
+            var txtStream = await customReactions.GroupBy(cr => cr.Trigger)
+                                                        .OrderBy(cr => cr.Key)
+                                                        .Select(cr => new { Trigger = cr.Key, Responses = cr.Select(y => new { id = y.Id, text = y.Response }).ToList() })
+                                                        .ToJson()
+                                                        .ToStream()
+                                                        .ConfigureAwait(false);
+
+            if (Context.Guild == null) // its a private one, just send back
+                await Context.Channel.SendFileAsync(txtStream, "customreactions.txt", GetText("list_all")).ConfigureAwait(false);
+            else
+                await ((IGuildUser)Context.User).SendFileAsync(txtStream, "customreactions.txt", GetText("list_all")).ConfigureAwait(false);
         }
 
         [NadekoCommand, Usage, Description, Aliases]
-        public async Task ListCustReactG(IUserMessage imsg, int page = 1)
+        public async Task ListCustReactG(int page = 1)
         {
-            var channel = (ITextChannel)imsg.Channel;
             if (page < 1 || page > 10000)
                 return;
-            ConcurrentHashSet<CustomReaction> customReactions;
-            if (channel == null)
-                customReactions = GlobalReactions;
+            CustomReaction[] customReactions;
+            if (Context.Guild == null)
+                customReactions = GlobalReactions.Where(cr => cr != null).ToArray();
             else
-                customReactions = GuildReactions.GetOrAdd(channel.Guild.Id, new ConcurrentHashSet<CustomReaction>());
+                customReactions = GuildReactions.GetOrAdd(Context.Guild.Id, new CustomReaction[]{ }).Where(cr => cr != null).ToArray();
 
             if (customReactions == null || !customReactions.Any())
-                await imsg.Channel.SendMessageAsync("`No custom reactions found`").ConfigureAwait(false);
-            else
-                await imsg.Channel.SendMessageAsync($"{imsg.Author.Mention}\n`Page {page} of custom reactions (grouped):`\n" + 
-                                    string.Join("\r\n", customReactions
-                                                        .GroupBy(cr=>cr.Trigger)
-                                                        .OrderBy(cr => cr.Key)
-                                                        .Skip((page - 1) * 20)
-                                                        .Take(20)
-                                                        .Select(cr => $"**{cr.Key.Trim().ToLowerInvariant()}** `x{cr.Count()}`")))
-                             .ConfigureAwait(false);
-        }
-
-        [NadekoCommand, Usage, Description, Aliases]
-        public async Task ShowCustReact(IUserMessage imsg, int id)
-        {
-            var channel = imsg.Channel as ITextChannel;
-
-            ConcurrentHashSet<CustomReaction> customReactions;
-            if (channel == null)
-                customReactions = GlobalReactions;
-            else
-                customReactions = GuildReactions.GetOrAdd(channel.Guild.Id, new ConcurrentHashSet<CustomReaction>());
-
-            var found = customReactions.FirstOrDefault(cr => cr.Id == id);
-
-            if (found == null)
-                await imsg.Channel.SendMessageAsync("`No custom reaction found with that id.`").ConfigureAwait(false);
+            {
+                await ReplyErrorLocalized("no_found").ConfigureAwait(false);
+            }
             else
             {
-                await imsg.Channel.SendMessageAsync($"`Custom reaction #{id}`\n`Trigger:` {found.Trigger}\n`Response:` {found.Response} ```css\n{found.Response}```")
+                var ordered = customReactions
+                    .GroupBy(cr => cr.Trigger)
+                    .OrderBy(cr => cr.Key)
+                    .ToList();
+
+                var lastPage = ordered.Count / 20;
+                await Context.Channel.SendPaginatedConfirmAsync(page, (curPage) =>
+                    new EmbedBuilder().WithOkColor()
+                        .WithTitle(GetText("name"))
+                        .WithDescription(string.Join("\r\n", ordered
+                                                         .Skip((curPage - 1) * 20)
+                                                         .Take(20)
+                                                         .Select(cr => $"**{cr.Key.Trim().ToLowerInvariant()}** `x{cr.Count()}`"))), lastPage)
                              .ConfigureAwait(false);
             }
         }
 
         [NadekoCommand, Usage, Description, Aliases]
-        public async Task DelCustReact(IUserMessage imsg, int id)
+        public async Task ShowCustReact(int id)
         {
-            var channel = imsg.Channel as ITextChannel;
+            CustomReaction[] customReactions;
+            if (Context.Guild == null)
+                customReactions = GlobalReactions;
+            else
+                customReactions = GuildReactions.GetOrAdd(Context.Guild.Id, new CustomReaction[]{ });
 
-            if ((channel == null && !NadekoBot.Credentials.IsOwner(imsg.Author)) || (channel != null && !((IGuildUser)imsg.Author).GuildPermissions.Administrator))
+            var found = customReactions.FirstOrDefault(cr => cr?.Id == id);
+
+            if (found == null)
             {
-                try { await imsg.Channel.SendMessageAsync("Insufficient permissions. Requires Bot ownership for global custom reactions, and Administrator for guild custom reactions."); } catch { }
+                await ReplyErrorLocalized("no_found_id").ConfigureAwait(false);
+                return;
+            }
+            else
+            {
+                await Context.Channel.EmbedAsync(new EmbedBuilder().WithOkColor()
+                    .WithDescription($"#{id}")
+                    .AddField(efb => efb.WithName(GetText("trigger")).WithValue(found.Trigger))
+                    .AddField(efb => efb.WithName(GetText("response")).WithValue(found.Response + "\n```css\n" + found.Response + "```"))
+                    ).ConfigureAwait(false);
+            }
+        }
+
+        [NadekoCommand, Usage, Description, Aliases]
+        public async Task DelCustReact(int id)
+        {
+            if ((Context.Guild == null && !NadekoBot.Credentials.IsOwner(Context.User)) || (Context.Guild != null && !((IGuildUser)Context.User).GuildPermissions.Administrator))
+            {
+                await ReplyErrorLocalized("insuff_perms").ConfigureAwait(false);
                 return;
             }
 
@@ -234,28 +313,184 @@ namespace NadekoBot.Modules.CustomReactions
             {
                 toDelete = uow.CustomReactions.Get(id);
                 if (toDelete == null) //not found
-                    return;
-
-                if ((toDelete.GuildId == null || toDelete.GuildId == 0) && channel == null)
+                    success = false;
+                else
                 {
-                    uow.CustomReactions.Remove(toDelete);
-                    GlobalReactions.RemoveWhere(cr => cr.Id == toDelete.Id);
-                    success = true;
+                    if ((toDelete.GuildId == null || toDelete.GuildId == 0) && Context.Guild == null)
+                    {
+                        uow.CustomReactions.Remove(toDelete);
+                        //todo i can dramatically improve performance of this, if Ids are ordered.
+                        _globalReactions = GlobalReactions.Where(cr => cr?.Id != toDelete.Id).ToArray();
+                        success = true;
+                    }
+                    else if ((toDelete.GuildId != null && toDelete.GuildId != 0) && Context.Guild.Id == toDelete.GuildId)
+                    {
+                        uow.CustomReactions.Remove(toDelete);
+                        GuildReactions.AddOrUpdate(Context.Guild.Id, new CustomReaction[] { }, (key, old) =>
+                        {
+                            return old.Where(cr => cr?.Id != toDelete.Id).ToArray();
+                        });
+                        success = true;
+                    }
+                    if (success)
+                        await uow.CompleteAsync().ConfigureAwait(false);
                 }
-                else if ((toDelete.GuildId != null && toDelete.GuildId != 0) && channel?.Guild.Id == toDelete.GuildId)
-                {
-                    uow.CustomReactions.Remove(toDelete);
-                    GuildReactions.GetOrAdd(channel.Guild.Id, new ConcurrentHashSet<CustomReaction>()).RemoveWhere(cr => cr.Id == toDelete.Id);
-                    success = true;
-                }
-                if(success)
-                    await uow.CompleteAsync().ConfigureAwait(false);
             }
 
             if (success)
-                await imsg.Channel.SendMessageAsync("**Successfully deleted custom reaction** " + toDelete.ToString()).ConfigureAwait(false);
+            {
+                await Context.Channel.EmbedAsync(new EmbedBuilder().WithOkColor()
+                    .WithTitle(GetText("deleted"))
+                    .WithDescription("#" + toDelete.Id)
+                    .AddField(efb => efb.WithName(GetText("trigger")).WithValue(toDelete.Trigger))
+                    .AddField(efb => efb.WithName(GetText("response")).WithValue(toDelete.Response)));
+            }
             else
-                await imsg.Channel.SendMessageAsync("`Failed to find that custom reaction.`").ConfigureAwait(false);
+            {
+                await ReplyErrorLocalized("no_found_id").ConfigureAwait(false);
+            }
+        }
+
+        [NadekoCommand, Usage, Description, Aliases]
+        public async Task CrDm(int id)
+        {
+            if ((Context.Guild == null && !NadekoBot.Credentials.IsOwner(Context.User)) || 
+                (Context.Guild != null && !((IGuildUser)Context.User).GuildPermissions.Administrator))
+            {
+                await ReplyErrorLocalized("insuff_perms").ConfigureAwait(false);
+                return;
+            }
+
+            CustomReaction[] reactions = new CustomReaction[0];
+
+            if (Context.Guild == null)
+                reactions = GlobalReactions;
+            else
+            {
+                GuildReactions.TryGetValue(Context.Guild.Id, out reactions);
+            }
+            if (reactions.Any())
+            {
+                var reaction = reactions.FirstOrDefault(x => x.Id == id);
+
+                if (reaction == null)
+                {
+                    await ReplyErrorLocalized("no_found_id").ConfigureAwait(false);
+                    return;
+                }
+
+                var setValue = reaction.DmResponse = !reaction.DmResponse;
+
+                using (var uow = DbHandler.UnitOfWork())
+                {
+                    uow.CustomReactions.Get(id).DmResponse = setValue;
+                    uow.Complete();
+                }
+
+                if (setValue)
+                {
+                    await ReplyConfirmLocalized("crdm_enabled", Format.Code(reaction.Id.ToString())).ConfigureAwait(false);
+                }
+                else
+                {
+                    await ReplyConfirmLocalized("crdm_disabled", Format.Code(reaction.Id.ToString())).ConfigureAwait(false);
+                }
+            }
+            else
+            {
+                await ReplyErrorLocalized("no_found").ConfigureAwait(false);
+            }
+        }
+
+        [NadekoCommand, Usage, Description, Aliases]
+        public async Task CrAd(int id)
+        {
+            if ((Context.Guild == null && !NadekoBot.Credentials.IsOwner(Context.User)) ||
+                (Context.Guild != null && !((IGuildUser)Context.User).GuildPermissions.Administrator))
+            {
+                await ReplyErrorLocalized("insuff_perms").ConfigureAwait(false);
+                return;
+            }
+
+            CustomReaction[] reactions = new CustomReaction[0];
+
+            if (Context.Guild == null)
+                reactions = GlobalReactions;
+            else
+            {
+                GuildReactions.TryGetValue(Context.Guild.Id, out reactions);
+            }
+            if (reactions.Any())
+            {
+                var reaction = reactions.FirstOrDefault(x => x.Id == id);
+
+                if (reaction == null)
+                {
+                    await ReplyErrorLocalized("no_found_id").ConfigureAwait(false);
+                    return;
+                }
+
+                var setValue = reaction.AutoDeleteTrigger = !reaction.AutoDeleteTrigger;
+
+                using (var uow = DbHandler.UnitOfWork())
+                {
+                    uow.CustomReactions.Get(id).AutoDeleteTrigger = setValue;
+                    uow.Complete();
+                }
+
+                if (setValue)
+                {
+                    await ReplyConfirmLocalized("crad_enabled", Format.Code(reaction.Id.ToString())).ConfigureAwait(false);
+                }
+                else
+                {
+                    await ReplyConfirmLocalized("crad_disabled", Format.Code(reaction.Id.ToString())).ConfigureAwait(false);
+                }
+            }
+            else
+            {
+                await ReplyErrorLocalized("no_found").ConfigureAwait(false);
+            }
+        }
+
+        [NadekoCommand, Usage, Description, Aliases]
+        [OwnerOnly]
+        public async Task CrStatsClear(string trigger = null)
+        {
+            if (string.IsNullOrWhiteSpace(trigger))
+            {
+                ClearStats();
+                await ReplyConfirmLocalized("all_stats_cleared").ConfigureAwait(false);
+            }
+            else
+            {
+                uint throwaway;
+                if (ReactionStats.TryRemove(trigger, out throwaway))
+                {
+                    await ReplyErrorLocalized("stats_cleared", Format.Bold(trigger)).ConfigureAwait(false);
+                }
+                else
+                {
+                    await ReplyErrorLocalized("stats_not_found").ConfigureAwait(false);
+                }
+            }
+        }
+
+        [NadekoCommand, Usage, Description, Aliases]
+        public async Task CrStats(int page = 1)
+        {
+            if (page < 1)
+                return;
+            var ordered = ReactionStats.OrderByDescending(x => x.Value).ToArray();
+            if (!ordered.Any())
+                return;
+            var lastPage = ordered.Length / 9;
+            await Context.Channel.SendPaginatedConfirmAsync(page,
+                (curPage) => ordered.Skip((curPage - 1) * 9)
+                                    .Take(9)
+                                    .Aggregate(new EmbedBuilder().WithOkColor().WithTitle(GetText("stats")),
+                                            (agg, cur) => agg.AddField(efb => efb.WithName(cur.Key).WithValue(cur.Value.ToString()).WithIsInline(true))), lastPage)
+                .ConfigureAwait(false);
         }
     }
 }

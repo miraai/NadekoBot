@@ -1,151 +1,177 @@
-﻿using Discord;
+﻿using System;
+using Discord;
 using Discord.Commands;
+using Discord.WebSocket;
 using NadekoBot.Attributes;
-using System;
+using NadekoBot.Extensions;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
-using System.Threading;
+using System.Text;
 using System.Threading.Tasks;
+using ImageSharp.Processing;
 
 namespace NadekoBot.Modules.Games
 {
     public partial class Games
     {
-        public static ConcurrentDictionary<IGuild, Poll> ActivePolls = new ConcurrentDictionary<IGuild, Poll>();
-
-        [NadekoCommand, Usage, Description, Aliases]
-        [RequirePermission(GuildPermission.ManageMessages)]
-        [RequireContext(ContextType.Guild)]
-        public Task Poll(IUserMessage umsg, [Remainder] string arg = null)
-            => InternalStartPoll(umsg, arg, isPublic: false);
-
-        [NadekoCommand, Usage, Description, Aliases]
-        [RequirePermission(GuildPermission.ManageMessages)]
-        [RequireContext(ContextType.Guild)]
-        public Task PublicPoll(IUserMessage umsg, [Remainder] string arg = null)
-            => InternalStartPoll(umsg, arg, isPublic: true);
-
-        private async Task InternalStartPoll(IUserMessage umsg, string arg, bool isPublic = false)
+        [Group]
+        public class PollCommands : NadekoSubmodule
         {
-            var channel = (ITextChannel)umsg.Channel;
+            public static ConcurrentDictionary<ulong, Poll> ActivePolls = new ConcurrentDictionary<ulong, Poll>();
 
-            if (!(umsg.Author as IGuildUser).GuildPermissions.ManageChannels)
-                return;
-            if (string.IsNullOrWhiteSpace(arg) || !arg.Contains(";"))
-                return;
-            var data = arg.Split(';');
-            if (data.Length < 3)
-                return;
+            [NadekoCommand, Usage, Description, Aliases]
+            [RequireUserPermission(GuildPermission.ManageMessages)]
+            [RequireContext(ContextType.Guild)]
+            public Task Poll([Remainder] string arg = null)
+                => InternalStartPoll(arg, false);
 
-            var poll = new Poll(umsg, data[0], data.Skip(1), isPublic: isPublic);
-            if (ActivePolls.TryAdd(channel.Guild, poll))
+            [NadekoCommand, Usage, Description, Aliases]
+            [RequireUserPermission(GuildPermission.ManageMessages)]
+            [RequireContext(ContextType.Guild)]
+            public Task PublicPoll([Remainder] string arg = null)
+                => InternalStartPoll(arg, true);
+
+            [NadekoCommand, Usage, Description, Aliases]
+            [RequireUserPermission(GuildPermission.ManageMessages)]
+            [RequireContext(ContextType.Guild)]
+            public async Task PollStats()
             {
-                await poll.StartPoll().ConfigureAwait(false);
-            }
-            else
-                await channel.SendMessageAsync("`Poll is already running on this server.`").ConfigureAwait(false);
-        }
-
-        [NadekoCommand, Usage, Description, Aliases]
-        [RequirePermission(GuildPermission.ManageMessages)]
-        [RequireContext(ContextType.Guild)]
-        public async Task Pollend(IUserMessage umsg)
-        {
-            var channel = (ITextChannel)umsg.Channel;
-
-            Poll poll;
-            ActivePolls.TryRemove(channel.Guild, out poll);
-            await poll.StopPoll().ConfigureAwait(false);
-        }
-    }
-
-    public class Poll
-    {
-        private readonly IUserMessage originalMessage;
-        private readonly IGuild guild;
-        private readonly string[] answers;
-        private ConcurrentDictionary<ulong, int> participants = new ConcurrentDictionary<ulong, int>();
-        private readonly string question;
-        private DateTime started;
-        private CancellationTokenSource pollCancellationSource = new CancellationTokenSource();
-        private readonly bool isPublic;
-
-        public Poll(IUserMessage umsg, string question, IEnumerable<string> enumerable, bool isPublic = false)
-        {
-            this.originalMessage = umsg;
-            this.guild = ((ITextChannel)umsg.Channel).Guild;
-            this.question = question;
-            this.answers = enumerable as string[] ?? enumerable.ToArray();
-            this.isPublic = isPublic;
-        }
-
-        public async Task StartPoll()
-        {
-            started = DateTime.Now;
-            NadekoBot.Client.MessageReceived += Vote;
-            var msgToSend = $"📃**{originalMessage.Author.Username}** has created a poll which requires your attention:\n\n**{question}**\n";
-            var num = 1;
-            msgToSend = answers.Aggregate(msgToSend, (current, answ) => current + $"`{num++}.` **{answ}**\n");
-            if (!isPublic)
-                msgToSend += "\n**Private Message me with the corresponding number of the answer.**";
-            else
-                msgToSend += "\n**Send a Message here with the corresponding number of the answer.**";
-            await originalMessage.Channel.SendMessageAsync(msgToSend).ConfigureAwait(false);
-        }
-
-        public async Task StopPoll()
-        {
-            NadekoBot.Client.MessageReceived -= Vote;
-            try
-            {
-                var results = participants.GroupBy(kvp => kvp.Value)
-                                .ToDictionary(x => x.Key, x => x.Sum(kvp => 1))
-                                .OrderByDescending(kvp => kvp.Value);
-
-                var totalVotesCast = results.Sum(kvp => kvp.Value);
-                if (totalVotesCast == 0)
-                {
-                    await originalMessage.Channel.SendMessageAsync("📄 **No votes have been cast.**").ConfigureAwait(false);
+                Poll poll;
+                if (!ActivePolls.TryGetValue(Context.Guild.Id, out poll))
                     return;
-                }
-                var closeMessage = $"--------------**POLL CLOSED**--------------\n" +
-                                   $"📄 , here are the results:\n";
-                closeMessage = results.Aggregate(closeMessage, (current, kvp) => current + $"`{kvp.Key}.` **[{answers[kvp.Key - 1]}]**" +
-                                                                                 $" has {kvp.Value} votes." +
-                                                                                 $"({kvp.Value * 1.0f / totalVotesCast * 100}%)\n");
 
-                await originalMessage.Channel.SendMessageAsync($"📄 **Total votes cast**: {totalVotesCast}\n{closeMessage}").ConfigureAwait(false);
+                await Context.Channel.EmbedAsync(poll.GetStats(GetText("current_poll_results")));
             }
-            catch (Exception ex)
+
+            private async Task InternalStartPoll(string arg, bool isPublic = false)
             {
-                Console.WriteLine($"Error in poll game {ex}");
+                var channel = (ITextChannel)Context.Channel;
+
+                if (string.IsNullOrWhiteSpace(arg) || !arg.Contains(";"))
+                    return;
+                var data = arg.Split(';');
+                if (data.Length < 3)
+                    return;
+
+                var poll = new Poll(Context.Message, data[0], data.Skip(1), isPublic: isPublic);
+                if (ActivePolls.TryAdd(channel.Guild.Id, poll))
+                {
+                    await poll.StartPoll().ConfigureAwait(false);
+                }
+                else
+                    await ReplyErrorLocalized("poll_already_running").ConfigureAwait(false);
+            }
+
+            [NadekoCommand, Usage, Description, Aliases]
+            [RequireUserPermission(GuildPermission.ManageMessages)]
+            [RequireContext(ContextType.Guild)]
+            public async Task Pollend()
+            {
+                var channel = (ITextChannel)Context.Channel;
+
+                Poll poll;
+                ActivePolls.TryRemove(channel.Guild.Id, out poll);
+                await poll.StopPoll().ConfigureAwait(false);
             }
         }
 
-        private Task Vote(IMessage imsg)
+        public class Poll
         {
-            // has to be a user message
-            var msg = imsg as IUserMessage;
-            if (msg == null || msg.Author.IsBot)
-                return Task.CompletedTask;
+            private readonly IUserMessage _originalMessage;
+            private readonly IGuild _guild;
+            private string[] answers { get; }
+            private readonly ConcurrentDictionary<ulong, int> _participants = new ConcurrentDictionary<ulong, int>();
+            private readonly string _question;
+            public bool IsPublic { get; }
 
-            // has to be an integer
-            int vote;
-            if (!int.TryParse(imsg.Content, out vote))
-                return Task.CompletedTask;
-            if (vote < 1 || vote > answers.Length)
-                return Task.CompletedTask;
+            public Poll(IUserMessage umsg, string question, IEnumerable<string> enumerable, bool isPublic = false)
+            {
+                _originalMessage = umsg;
+                _guild = ((ITextChannel)umsg.Channel).Guild;
+                _question = question;
+                answers = enumerable as string[] ?? enumerable.ToArray();
+                IsPublic = isPublic;
+            }
 
-            var t = Task.Run(async () =>
+            public EmbedBuilder GetStats(string title)
+            {
+                var results = _participants.GroupBy(kvp => kvp.Value)
+                                    .ToDictionary(x => x.Key, x => x.Sum(kvp => 1))
+                                    .OrderByDescending(kvp => kvp.Value)
+                                    .ToArray();
+
+                var eb = new EmbedBuilder().WithTitle(title);
+
+                var sb = new StringBuilder()
+                    .AppendLine(Format.Bold(_question))
+                    .AppendLine();
+
+                var totalVotesCast = 0;
+                if (results.Length == 0)
+                {
+                    sb.AppendLine(GetText("no_votes_cast"));
+                }
+                else
+                {
+                    for (int i = 0; i < results.Length; i++)
+                    {
+                        var result = results[i];
+                        sb.AppendLine(GetText("poll_result", 
+                            result.Key,
+                            Format.Bold(answers[result.Key - 1]), 
+                            Format.Bold(result.Value.ToString())));
+                        totalVotesCast += result.Value;
+                    }
+                }
+
+
+                eb.WithDescription(sb.ToString())
+                  .WithFooter(efb => efb.WithText(GetText("x_votes_cast", totalVotesCast)));
+
+                return eb;
+            }
+
+            public async Task StartPoll()
+            {
+                NadekoBot.Client.MessageReceived += Vote;
+                var msgToSend = GetText("poll_created", Format.Bold(_originalMessage.Author.Username)) + "\n\n" + Format.Bold(_question) + "\n";
+                var num = 1;
+                msgToSend = answers.Aggregate(msgToSend, (current, answ) => current + $"`{num++}.` **{answ}**\n");
+                if (!IsPublic)
+                    msgToSend += "\n" + Format.Bold(GetText("poll_vote_private"));
+                else
+                    msgToSend += "\n" + Format.Bold(GetText("poll_vote_public"));
+                await _originalMessage.Channel.SendConfirmAsync(msgToSend).ConfigureAwait(false);
+            }
+
+            public async Task StopPoll()
+            {
+                NadekoBot.Client.MessageReceived -= Vote;
+                await _originalMessage.Channel.EmbedAsync(GetStats("POLL CLOSED")).ConfigureAwait(false);
+            }
+
+            private async Task Vote(SocketMessage imsg)
             {
                 try
                 {
+                    // has to be a user message
+                    var msg = imsg as SocketUserMessage;
+                    if (msg == null || msg.Author.IsBot)
+                        return;
+
+                    // has to be an integer
+                    int vote;
+                    if (!int.TryParse(imsg.Content, out vote))
+                        return;
+                    if (vote < 1 || vote > answers.Length)
+                        return;
+
                     IMessageChannel ch;
-                    if (isPublic)
+                    if (IsPublic)
                     {
                         //if public, channel must be the same the poll started in
-                        if (originalMessage.Channel.Id != imsg.Channel.Id)
+                        if (_originalMessage.Channel.Id != imsg.Channel.Id)
                             return;
                         ch = imsg.Channel;
                     }
@@ -156,29 +182,33 @@ namespace NadekoBot.Modules.Games
                             return;
 
                         // user must be a member of the guild this poll is in
-                        var guildUsers = await guild.GetUsersAsync().ConfigureAwait(false);
-                        if (!guildUsers.Any(u => u.Id == imsg.Author.Id))
+                        var guildUsers = await _guild.GetUsersAsync().ConfigureAwait(false);
+                        if (guildUsers.All(u => u.Id != imsg.Author.Id))
                             return;
                     }
 
                     //user can vote only once
-                    if (participants.TryAdd(msg.Author.Id, vote))
+                    if (_participants.TryAdd(msg.Author.Id, vote))
                     {
-                        if (!isPublic)
+                        if (!IsPublic)
                         {
-                            await ch.SendMessageAsync($"Thanks for voting **{msg.Author.Username}**.").ConfigureAwait(false);
+                            await ch.SendConfirmAsync(GetText("thanks_for_voting", Format.Bold(msg.Author.Username))).ConfigureAwait(false);
                         }
                         else
                         {
-                            var toDelete = await ch.SendMessageAsync($"{msg.Author.Mention} cast their vote.").ConfigureAwait(false);
-                            await Task.Delay(5000);
-                            await toDelete.DeleteAsync().ConfigureAwait(false);
+                            var toDelete = await ch.SendConfirmAsync(GetText("poll_voted", Format.Bold(msg.Author.ToString()))).ConfigureAwait(false);
+                            toDelete.DeleteAfter(5);
                         }
                     }
                 }
                 catch { }
-            });
-            return Task.CompletedTask;
+            }
+
+            private string GetText(string key, params object[] replacements)
+                => NadekoTopLevelModule.GetTextStatic(key,
+                    NadekoBot.Localization.GetCultureInfo(_guild.Id),
+                    typeof(Games).Name.ToLowerInvariant(),
+                    replacements);
         }
     }
 }

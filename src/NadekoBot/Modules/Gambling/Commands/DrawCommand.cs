@@ -4,37 +4,28 @@ using ImageSharp;
 using NadekoBot.Attributes;
 using NadekoBot.Extensions;
 using NadekoBot.Modules.Gambling.Models;
-using NLog;
-using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
+using Image = ImageSharp.Image;
 
 namespace NadekoBot.Modules.Gambling
 {
     public partial class Gambling
     {
         [Group]
-        public class DrawCommands
+        public class DrawCommands : NadekoSubmodule
         {
-            private static readonly ConcurrentDictionary<IGuild, Cards> AllDecks = new ConcurrentDictionary<IGuild, Cards>();
+            private static readonly ConcurrentDictionary<IGuild, Cards> _allDecks = new ConcurrentDictionary<IGuild, Cards>();
 
-
-            public DrawCommands()
-            {
-                _log = LogManager.GetCurrentClassLogger();
-            }
-
-            private const string cardsPath = "data/images/cards";
-            private Logger _log { get; }
+            private const string _cardsPath = "data/images/cards";
 
             [NadekoCommand, Usage, Description, Aliases]
             [RequireContext(ContextType.Guild)]
-            public async Task Draw(IUserMessage msg, int num = 1)
+            public async Task Draw(int num = 1)
             {
-                var channel = (ITextChannel)msg.Channel;
-                var cards = AllDecks.GetOrAdd(channel.Guild, (s) => new Cards());
+                var cards = _allDecks.GetOrAdd(Context.Guild, (s) => new Cards());
                 var images = new List<Image>();
                 var cardObjects = new List<Cards.Card>();
                 if (num > 5) num = 5;
@@ -42,32 +33,38 @@ namespace NadekoBot.Modules.Gambling
                 {
                     if (cards.CardPool.Count == 0 && i != 0)
                     {
-                        try { await channel.SendMessageAsync("No more cards in a deck.").ConfigureAwait(false); } catch (Exception ex) { _log.Warn(ex); }
+                        try
+                        {
+                            await ReplyErrorLocalized("no_more_cards").ConfigureAwait(false);
+                        }
+                        catch
+                        {
+                            // ignored
+                        }
                         break;
                     }
                     var currentCard = cards.DrawACard();
                     cardObjects.Add(currentCard);
-                    using (var stream = File.OpenRead(Path.Combine(cardsPath, currentCard.ToString().ToLowerInvariant()+ ".jpg").Replace(' ','_')))
+                    using (var stream = File.OpenRead(Path.Combine(_cardsPath, currentCard.ToString().ToLowerInvariant()+ ".jpg").Replace(' ','_')))
                         images.Add(new Image(stream));
                 }
                 MemoryStream bitmapStream = new MemoryStream();
-                images.Merge().SaveAsPng(bitmapStream);
+                images.Merge().Save(bitmapStream);
                 bitmapStream.Position = 0;
-                //todo CARD NAMES?
-                var toSend = $"{msg.Author.Mention}";
+                var toSend = $"{Context.User.Mention}";
                 if (cardObjects.Count == 5)
                     toSend += $" drew `{Cards.GetHandValue(cardObjects)}`";
 
-                await channel.SendFileAsync(bitmapStream, images.Count + " cards.jpg", toSend).ConfigureAwait(false);
+                await Context.Channel.SendFileAsync(bitmapStream, images.Count + " cards.jpg", toSend).ConfigureAwait(false);
             }
 
             [NadekoCommand, Usage, Description, Aliases]
             [RequireContext(ContextType.Guild)]
-            public async Task ShuffleDeck(IUserMessage imsg)
+            public async Task ShuffleDeck()
             {
-                var channel = (ITextChannel)imsg.Channel;
+                //var channel = (ITextChannel)Context.Channel;
 
-                AllDecks.AddOrUpdate(channel.Guild,
+                _allDecks.AddOrUpdate(Context.Guild,
                         (g) => new Cards(),
                         (g, c) =>
                         {
@@ -75,7 +72,7 @@ namespace NadekoBot.Modules.Gambling
                             return c;
                         });
 
-                await channel.SendMessageAsync("`Deck reshuffled.`").ConfigureAwait(false);
+                await ReplyConfirmLocalized("deck_reshuffled").ConfigureAwait(false);
             }
         }
     }

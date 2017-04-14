@@ -1,6 +1,7 @@
 ﻿using Discord;
 using Discord.Commands;
 using NadekoBot.Attributes;
+using NadekoBot.Extensions;
 using NadekoBot.Modules.Games.Trivia;
 using NadekoBot.Services;
 using NadekoBot.Services.Database.Models;
@@ -20,59 +21,84 @@ namespace NadekoBot.Modules.Permissions
         }
 
         [Group]
-        public class BlacklistCommands
+        public class BlacklistCommands : NadekoSubmodule
         {
-            public static ConcurrentHashSet<BlacklistItem> BlacklistedItems { get; set; } = new ConcurrentHashSet<BlacklistItem>();
+            public static ConcurrentHashSet<ulong> BlacklistedUsers { get; set; }
+            public static ConcurrentHashSet<ulong> BlacklistedGuilds { get; set; }
+            public static ConcurrentHashSet<ulong> BlacklistedChannels { get; set; }
 
             static BlacklistCommands()
             {
                 using (var uow = DbHandler.UnitOfWork())
                 {
-                    BlacklistedItems = new ConcurrentHashSet<BlacklistItem>(uow.BotConfig.GetOrCreate().Blacklist);
+                    var blacklist = uow.BotConfig.GetOrCreate().Blacklist;
+                    BlacklistedUsers = new ConcurrentHashSet<ulong>(blacklist.Where(bi => bi.Type == BlacklistType.User).Select(c => c.ItemId));
+                    BlacklistedGuilds = new ConcurrentHashSet<ulong>(blacklist.Where(bi => bi.Type == BlacklistType.Server).Select(c => c.ItemId));
+                    BlacklistedChannels = new ConcurrentHashSet<ulong>(blacklist.Where(bi => bi.Type == BlacklistType.Channel).Select(c => c.ItemId));
                 }
             }
 
             [NadekoCommand, Usage, Description, Aliases]
             [OwnerOnly]
-            public Task UserBlacklist(IUserMessage imsg, AddRemove action, ulong id)
-                => Blacklist(imsg, action, id, BlacklistType.User);
+            public Task UserBlacklist(AddRemove action, ulong id)
+                => Blacklist(action, id, BlacklistType.User);
 
             [NadekoCommand, Usage, Description, Aliases]
             [OwnerOnly]
-            public Task UserBlacklist(IUserMessage imsg, AddRemove action, IUser usr)
-                => Blacklist(imsg, action, usr.Id, BlacklistType.User);
+            public Task UserBlacklist(AddRemove action, IUser usr)
+                => Blacklist(action, usr.Id, BlacklistType.User);
 
             [NadekoCommand, Usage, Description, Aliases]
             [OwnerOnly]
-            public Task ChannelBlacklist(IUserMessage imsg, AddRemove action, ulong id)
-                => Blacklist(imsg, action, id, BlacklistType.Channel);
+            public Task ChannelBlacklist(AddRemove action, ulong id)
+                => Blacklist(action, id, BlacklistType.Channel);
 
             [NadekoCommand, Usage, Description, Aliases]
             [OwnerOnly]
-            public Task ServerBlacklist(IUserMessage imsg, AddRemove action, ulong id)
-                => Blacklist(imsg, action, id, BlacklistType.Server);
+            public Task ServerBlacklist(AddRemove action, ulong id)
+                => Blacklist(action, id, BlacklistType.Server);
 
             [NadekoCommand, Usage, Description, Aliases]
             [OwnerOnly]
-            public Task ServerBlacklist(IUserMessage imsg, AddRemove action, IGuild guild)
-                => Blacklist(imsg, action, guild.Id, BlacklistType.Server);
+            public Task ServerBlacklist(AddRemove action, IGuild guild)
+                => Blacklist(action, guild.Id, BlacklistType.Server);
 
-            private async Task Blacklist(IUserMessage imsg, AddRemove action, ulong id, BlacklistType type)
+            private async Task Blacklist(AddRemove action, ulong id, BlacklistType type)
             {
-                var channel = imsg.Channel;
-
                 using (var uow = DbHandler.UnitOfWork())
                 {
                     if (action == AddRemove.Add)
                     {
                         var item = new BlacklistItem { ItemId = id, Type = type };
                         uow.BotConfig.GetOrCreate().Blacklist.Add(item);
-                        BlacklistedItems.Add(item);
+                        if (type == BlacklistType.Server)
+                        {
+                            BlacklistedGuilds.Add(id);
+                        }
+                        else if (type == BlacklistType.Channel)
+                        {
+                            BlacklistedChannels.Add(id);
+                        }
+                        else if (type == BlacklistType.User)
+                        {
+                            BlacklistedUsers.Add(id);
+                        }                        
                     }
                     else
                     {
                         uow.BotConfig.GetOrCreate().Blacklist.RemoveWhere(bi => bi.ItemId == id && bi.Type == type);
-                        BlacklistedItems.RemoveWhere(bi => bi.ItemId == id && bi.Type == type);
+                        if (type == BlacklistType.Server)
+                        {
+                            BlacklistedGuilds.TryRemove(id);
+                        }
+                        else if (type == BlacklistType.Channel)
+                        {
+                            BlacklistedChannels.TryRemove(id);
+                        }
+                        else if (type == BlacklistType.User)
+                        {
+                            BlacklistedUsers.TryRemove(id);
+                        }
                     }
                     await uow.CompleteAsync().ConfigureAwait(false);
                 }
@@ -89,7 +115,7 @@ namespace NadekoBot.Modules.Permissions
                             }
                             break;
                         case BlacklistType.Channel:
-                            var item = Games.Games.TriviaCommands.RunningTrivias.FirstOrDefault(kvp => kvp.Value.channel.Id == id);
+                            var item = Games.Games.TriviaCommands.RunningTrivias.FirstOrDefault(kvp => kvp.Value.Channel.Id == id);
                             Games.Games.TriviaCommands.RunningTrivias.TryRemove(item.Key, out tg);
                             if (tg != null)
                             {
@@ -98,13 +124,14 @@ namespace NadekoBot.Modules.Permissions
                             break;
                         case BlacklistType.User:
                             break;
-                        default:
-                            break;
                     }
 
                 }
 
-                await channel.SendMessageAsync(":ok:").ConfigureAwait(false);
+                if(action == AddRemove.Add)
+                    await ReplyConfirmLocalized("blacklisted", Format.Code(type.ToString()), Format.Code(id.ToString())).ConfigureAwait(false);
+                else
+                    await ReplyConfirmLocalized("unblacklisted", Format.Code(type.ToString()), Format.Code(id.ToString())).ConfigureAwait(false);
             }
         }
     }

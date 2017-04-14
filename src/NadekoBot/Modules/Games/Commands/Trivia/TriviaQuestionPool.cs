@@ -1,9 +1,9 @@
 ﻿using NadekoBot.Extensions;
 using NadekoBot.Services;
-using Newtonsoft.Json.Linq;
+using Newtonsoft.Json;
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.IO;
 using System.Linq;
 
@@ -11,36 +11,54 @@ namespace NadekoBot.Modules.Games.Trivia
 {
     public class TriviaQuestionPool
     {
-        public static TriviaQuestionPool Instance { get; } = new TriviaQuestionPool();
-        public ConcurrentHashSet<TriviaQuestion> pool = new ConcurrentHashSet<TriviaQuestion>();
+        public class PokemonNameId
+        {
+            public int Id { get; set; }
+            public string Name { get; set; }
+        }
+
+        private static TriviaQuestionPool _instance;
+        public static TriviaQuestionPool Instance { get; } = _instance ?? (_instance = new TriviaQuestionPool());
+
+        private const string questionsFile = "data/trivia_questions.json";
+        private const string pokemonMapPath = "data/pokemon/name-id_map4.json";
+        private readonly int maxPokemonId;
 
         private Random rng { get; } = new NadekoRandom();
+        
+        private TriviaQuestion[] pool { get; }
+        private ImmutableDictionary<int, string> map { get; }
 
         static TriviaQuestionPool() { }
 
         private TriviaQuestionPool()
         {
-            Reload();
+            pool = JsonConvert.DeserializeObject<TriviaQuestion[]>(File.ReadAllText(questionsFile));
+            map = JsonConvert.DeserializeObject<PokemonNameId[]>(File.ReadAllText(pokemonMapPath))
+                    .ToDictionary(x => x.Id, x => x.Name)
+                    .ToImmutableDictionary();
+
+            maxPokemonId = 721; //xd
         }
 
-        public TriviaQuestion GetRandomQuestion(IEnumerable<TriviaQuestion> exclude)
+        public TriviaQuestion GetRandomQuestion(HashSet<TriviaQuestion> exclude, bool isPokemon)
         {
-            var list = pool.Except(exclude).ToList();
-            var rand = rng.Next(0, list.Count);
-            return list[rand];
-        }
+            if (pool.Length == 0)
+                return null;
 
-        public void Reload()
-        {
-            var arr = JArray.Parse(File.ReadAllText("data/questions.json"));
-
-            foreach (var item in arr)
+            if (isPokemon)
             {
-                var tq = new TriviaQuestion(item["Question"].ToString().SanitizeMentions(), item["Answer"].ToString().SanitizeMentions(), item["Category"]?.ToString());
-                pool.Add(tq);
+                var num = rng.Next(1, maxPokemonId + 1);
+                return new TriviaQuestion("Who's That Pokémon?", 
+                    map[num].ToTitleCase(),
+                    "Pokemon",
+                    $@"http://nadekobot.xyz/images/pokemon/shadows/{num}.png",
+                    $@"http://nadekobot.xyz/images/pokemon/real/{num}.png");
             }
-            var r = new NadekoRandom();
-            pool = new ConcurrentHashSet<TriviaQuestion>(pool.OrderBy(x => r.Next()));
+            TriviaQuestion randomQuestion;
+            while (exclude.Contains(randomQuestion = pool[rng.Next(0, pool.Length)])) ;
+
+            return randomQuestion;
         }
     }
 }
